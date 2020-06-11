@@ -1,0 +1,3 @@
+docker build -t pallid/tinode-mongodb-custom .
+
+docker run --env REST_SERVER_URL=https://mobile.ditcloud.ru/tinode/ --env CUSTOM_PUSH_ADDRESS=https://webhook.site/dc2764b1-17af-40d3-a768-26cd3d1fab5c -p 6060:6060 -d --name tinode-srv --network tinode-net pallid/tinode-mongodb-custom:latest

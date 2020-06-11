@@ -35,12 +35,14 @@ import (
 	_ "github.com/tinode/chat/server/auth/token"
 
 	// Database backends
+
 	_ "github.com/tinode/chat/server/db/mongodb"
 	_ "github.com/tinode/chat/server/db/mysql"
 	_ "github.com/tinode/chat/server/db/rethinkdb"
 
 	// Push notifications
 	"github.com/tinode/chat/server/push"
+	_ "github.com/tinode/chat/server/push/custom"
 	_ "github.com/tinode/chat/server/push/fcm"
 	_ "github.com/tinode/chat/server/push/stdout"
 	_ "github.com/tinode/chat/server/push/tnpg"
@@ -96,7 +98,7 @@ const (
 	defaultStaticMount = "/"
 
 	// Local path to static content
-	defaultStaticPath = "static"
+	defaultStaticPath = "C:\\tinode\\static"
 )
 
 // Build version number defined by the compiler:
@@ -326,6 +328,9 @@ func main() {
 
 		log.Printf("Profiling info saved to '%s.(cpu|mem)'", *pprofFile)
 	}
+
+	// adp := mongodb.GetAdapter()
+	// store.RegisterAdapter(adp)
 
 	err := store.Open(workerId, config.Store)
 	if err != nil {

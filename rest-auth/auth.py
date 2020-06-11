@@ -39,7 +39,7 @@ def auth():
                 'rec': {
                     'uid': dummy_data[uname]['uid'],
                     'authlvl': dummy_data[uname]['authlvl'],
-                    'features': dummy_data[uname]['features']
+                    'features': dummy_data[uname]['features'] # // V (valide) or L (loc)
                 }
             })
         else:

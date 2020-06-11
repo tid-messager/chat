@@ -43,14 +43,9 @@
 	"auth_config": {
 		"logical_names": ["basic:rest"],
 		"rest":{
-			"server_url": "https://webhook.site/dc2764b1-17af-40d3-a768-26cd3d1fab5c/",
+			"server_url": "$REST_SERVER_URL",
 			"allow_new_accounts": true,
 			"use_separate_endpoints": true
-		},
-		"basic": {
-			"add_to_tags": true,
-			"min_login_length": 3,
-			"min_password_length": 6
 		},
 		"token": {
 			"expire_in": 1209600,
@@ -110,6 +105,19 @@
 	},
 
 	"push": [
+		{
+			"name":"stdout",
+				"config": {
+					"enabled": true
+			}
+		},
+                {
+			"name":"custom",
+				"config": {
+					"enabled": true,
+                	"address": "$CUSTOM_PUSH_ADDRESS"
+			}
+		},
 		{
 			"name":"tnpg",
 			"config": {

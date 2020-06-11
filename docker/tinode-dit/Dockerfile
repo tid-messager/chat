@@ -118,12 +118,14 @@ WORKDIR /opt/tinode
 COPY config.template .
 COPY entrypoint.sh .
 
-# Get the desired Tinode build.
-ADD https://github.com/tinode/chat/releases/download/v$BINVERS/tinode-$TARGET_DB.linux-amd64.tar.gz .
+# # Get the desired Tinode build.
+# ADD https://github.com/tinode/chat/releases/download/v$BINVERS/tinode-$TARGET_DB.linux-amd64.tar.gz .
 
-# Unpack the Tinode archive.
-RUN tar -xzf tinode-$TARGET_DB.linux-amd64.tar.gz \
-	&& rm tinode-$TARGET_DB.linux-amd64.tar.gz
+# # Unpack the Tinode archive.
+# RUN tar -xzf tinode-$TARGET_DB.linux-amd64.tar.gz \
+# 	&& rm tinode-$TARGET_DB.linux-amd64.tar.gz
+
+COPY ./build .
 
 # Create directory for chatbot data.
 RUN mkdir /botdata
@@ -131,6 +133,9 @@ RUN mkdir /botdata
 # Make scripts runnable
 RUN chmod +x entrypoint.sh
 RUN chmod +x credentials.sh
+
+ENV REST_SERVER_URL=$REST_SERVER_URL
+ENV CUSTOM_PUSH_ADDRESS=$CUSTOM_PUSH_ADDRESS
 
 # Generate config from template and run the server.
 ENTRYPOINT ./entrypoint.sh
