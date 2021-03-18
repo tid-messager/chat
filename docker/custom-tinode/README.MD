@@ -3,18 +3,21 @@
 сборка Tinode server for Linux
 ```
 cd ./server
-go build -o ../docker/custom-tinode/build/tinode
+GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o ../docker/custom-tinode/build/tinode
 ```
 
 сборка init-db(tinode-db for mongodb) для Linux 
 ```
-cd ./tinode-db
- go build -tags mongodb -o ../docker/custom-tinode/build/init-db
+cd ../tinode-db
+GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -tags mongodb -o ../docker/custom-tinode/build/init-db
 ```
 
 сборка Docker Custom Tinode server
 ```
-docker build -t tinode-custom-mongodb .
+cd ../docker/custom-tinode
+# docker build -t tinode-custom-mongodb .
+docker build -t docker.pkg.github.com/tid-messager/chat/tinode-custom-mongodb:latest .
+docker push docker.pkg.github.com/tid-messager/chat/tinode-custom-mongodb:latest
 ```
 
 сеть
@@ -34,7 +37,7 @@ $ docker exec -it mongodb mongo
 
 запуск Docker Custom Tinode server
 ```
-docker run --env REST_SERVER_URL=http://localhost:8080 --env CUSTOM_PUSH_ADDRESS=https://webhook.site/dc2764b1-17af-40d3-a768-36cd3d1fab5c -p 6060:6060 -d --name tinode-srv --network tinode-net tinode-custom-mongodb:latest
+docker run --env REST_SERVER_URL=http://localhost:8080 --env CUSTOM_PUSH_ADDRESS=https://webhook.site/dc2764b1-17af-40d3-a768-36cd3d1fab5c -p 6060:6060 -d --name tinode-srv --network tinode-net docker.pkg.github.com/tid-messager/chat/tinode-custom-mongodb:latest
 ```
 
 docker-compose
