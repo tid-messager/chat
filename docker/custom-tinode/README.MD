@@ -52,7 +52,7 @@ services:
     networks:
      - tinode-net
   tinode-srv:
-    image: pallid/tinode-mongodb-custom:latest
+    image: docker.pkg.github.com/tid-messager/chat/tinode-custom-mongodb:latest
     environment:
       REST_SERVER_URL: http://localhost:8080
       CUSTOM_PUSH_ADDRESS: https://webhook.site/dc2764b1-17af-40d3-a768-36cd3d1fab5c
