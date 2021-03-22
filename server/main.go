@@ -98,7 +98,7 @@ const (
 	defaultStaticMount = "/"
 
 	// Local path to static content
-	defaultStaticPath = "C:\\tinode\\static"
+	defaultStaticPath = "static"
 )
 
 // Build version number defined by the compiler:

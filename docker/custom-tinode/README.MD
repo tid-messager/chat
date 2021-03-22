@@ -3,7 +3,7 @@
 сборка Tinode server for Linux
 ```
 cd ./server
-GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o ../docker/custom-tinode/build/tinode
+GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -tags mongodb -o ../docker/custom-tinode/build/tinode
 ```
 
 сборка init-db(tinode-db for mongodb) для Linux 
