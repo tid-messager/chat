@@ -68,7 +68,7 @@
 			},
 			"mongodb": {
 				"database": "tinode",
-				"addresses": "mongodb",
+				"addresses": "$MONGODB_ADDRESSES",
 				"replica_set": "rs0"
 			}
 		}

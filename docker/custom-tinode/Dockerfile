@@ -136,6 +136,7 @@ RUN chmod +x credentials.sh
 
 ENV REST_SERVER_URL=$REST_SERVER_URL
 ENV CUSTOM_PUSH_ADDRESS=$CUSTOM_PUSH_ADDRESS
+ENV MONGODB_ADDRESSES=$MONGODB_ADDRESSES
 
 # Generate config from template and run the server.
 ENTRYPOINT ./entrypoint.sh

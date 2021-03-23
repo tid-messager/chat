@@ -37,7 +37,7 @@ $ docker exec -it mongodb mongo
 
 запуск Docker Custom Tinode server
 ```
-docker run --env REST_SERVER_URL=http://localhost:8080 --env CUSTOM_PUSH_ADDRESS=https://webhook.site/dc2764b1-17af-40d3-a768-36cd3d1fab5c -p 6060:6060 -d --name tinode-srv --network tinode-net docker.pkg.github.com/tid-messager/chat/tinode-custom-mongodb:latest
+docker run --env REST_SERVER_URL=http://localhost:8080 --env CUSTOM_PUSH_ADDRESS=https://webhook.site/dc2764b1-17af-40d3-a768-36cd3d1fab5c --env MONGODB_ADDRESSES=mongodb -p 6060:6060 -d --name tinode-srv --network tinode-net docker.pkg.github.com/tid-messager/chat/tinode-custom-mongodb:latest
 ```
 
 docker-compose
