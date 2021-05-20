@@ -81,15 +81,10 @@ func (Handler) Init(jsonconf string) error {
 		return nil
 	}
 
-	// if config.OrgName == "" {
-	// 	return errors.New("push.tnpg.org not specified.")
-	// }
-
 	if config.Address == "" {
 		return errors.New("custom push not specified")
 	}
 
-	//handler.postURL = baseTargetAddress + config.OrgName
 	handler.postURL = config.Address
 	handler.input = make(chan *push.Receipt, bufferSize)
 	handler.stop = make(chan bool, 1)
@@ -109,13 +104,6 @@ func (Handler) Init(jsonconf string) error {
 }
 
 func postMessage(body interface{}, config *configType) (*batchResponse, error) {
-	// buf := new(bytes.Buffer)
-	// gzw := gzip.NewWriter(buf)
-	// err := json.NewEncoder(gzw).Encode(body)
-	// gzw.Close()
-	// if err != nil {
-	// 	return nil, err
-	// }
 
 	buf, err := json.Marshal(body)
 	if err != nil {
@@ -126,75 +114,24 @@ func postMessage(body interface{}, config *configType) (*batchResponse, error) {
 	if err != nil {
 		return nil, err
 	}
-	//req.Header.Add("Authorization", "Bearer "+config.AuthToken)
 	req.Header.Set("Content-Type", "application/json; charset=utf-8")
-	// req.Header.Add("Content-Encoding", "gzip")
-	// req.Header.Add("Accept-Encoding", "gzip")
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
 
-	var batch batchResponse
-	// var reader io.ReadCloser
-	// if strings.Contains(resp.Header.Get("Content-Encoding"), "gzip") {
-	// 	reader, err = gzip.NewReader(resp.Body)
-	// 	if err == nil {
-	// 		defer reader.Close()
-	// 	}
-	// } else {
-	// 	reader = resp.Body
-	// }
-
-	// if err == nil {
-	// 	err = json.NewDecoder(reader).Decode(&batch)
-	// }
-	// resp.Body.Close()
-
-	// if err != nil {
-	// 	// Just log the error, but don't report it to caller. The push succeeded.
-	// 	log.Println("custom push failed to decode response", err)
-	// }
-
-	batch.httpCode = resp.StatusCode
-	batch.httpStatus = resp.Status
-
-	return &batch, nil
+	return &batchResponse{httpCode: resp.StatusCode, httpStatus: resp.Status}, nil
 }
 
 func sendPushes(rcpt *push.Receipt, config *configType) {
-	// messages := fcm.PrepareNotifications(rcpt, nil)
-	// if messages == nil {
-	// 	log.Println("not notification")
-	// 	return
-	// }
-
-	// n := len(messages)
-	// for i := 0; i < n; i += batchSize {
-	// 	upper := i + batchSize
-	// 	if upper > n {
-	// 		upper = n
-	// 	}
-	// 	var payloads []interface{}
-	// 	for j := i; j < upper; j++ {
-	// 		payloads = append(payloads, messages[j].Message)
-	// 	}
 	if resp, err := postMessage(rcpt, config); err != nil {
 		log.Println("custom push request failed:", err)
-		// break
 	} else if resp.httpCode >= 300 {
 		log.Println("custom push rejected:", resp.httpStatus)
-		// break
 	} else if resp.FatalCode != "" {
 		log.Println("custom push failed:", resp.FatalMessage)
-		// break
 	}
-	// } else {
-	// 	// Check for expired tokens and other errors.
-	// 	handleResponse(resp, messages[i:upper])
-	// }
-	// }
 }
 
 func handleResponse(batch *batchResponse, messages []fcm.MessageData) {
