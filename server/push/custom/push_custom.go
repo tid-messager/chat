@@ -103,9 +103,9 @@ func (Handler) Init(jsonconf string) error {
 	return nil
 }
 
-func postMessage(body interface{}, config *configType) (*batchResponse, error) {
+func postMessage(rcpt *push.Receipt, config *configType) (*batchResponse, error) {
 
-	buf, err := json.Marshal(body)
+	buf, err := json.Marshal(rcpt)
 	if err != nil {
 		return nil, err
 	}
