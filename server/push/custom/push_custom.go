@@ -11,6 +11,7 @@ import (
 	"github.com/tinode/chat/server/push"
 	"github.com/tinode/chat/server/push/fcm"
 	"github.com/tinode/chat/server/store"
+	t "github.com/tinode/chat/server/store/types"
 )
 
 const (
@@ -53,8 +54,14 @@ type batchResponse struct {
 	Responses []*tnpgResponse `json:"resp,omitempty"`
 
 	// Local values
-	httpCode   int
-	httpStatus string
+	httpCode    int
+	httpStatus  string
+	nothingSend bool
+}
+
+type message struct {
+	Payload push.Payload              `json:"payload"`
+	To      map[string]push.Recipient `json:"to"`
 }
 
 // Error codes copied from https://github.com/firebase/firebase-admin-go/blob/master/messaging/messaging.go
@@ -103,9 +110,64 @@ func (Handler) Init(jsonconf string) error {
 	return nil
 }
 
+func PrepareNotifications(rcpt *push.Receipt) (*message, int, error) {
+
+	msg := message{
+		Payload: rcpt.Payload,
+	}
+
+	// List of UIDs for querying the database
+	uids := make([]t.Uid, len(rcpt.To))
+	// These devices were online in the topic when the message was sent.
+	skipDevices := make(map[string]struct{})
+	i := 0
+	for uid, to := range rcpt.To {
+		uids[i] = uid
+		i++
+		// Some devices were online and received the message. Skip them.
+		for _, deviceID := range to.Devices {
+			skipDevices[deviceID] = struct{}{}
+		}
+	}
+
+	devices, count, err := store.Devices.GetAll(uids...)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	if count == 0 {
+		return nil, count, nil
+	}
+
+	for uid, devList := range devices {
+		// пропускаем тех кто получил сообщения
+		// в интерактивном режиме
+		if rcpt.To[uid].Delivered > 0 {
+			continue
+		}
+		for i := range devList {
+			d := &devList[i]
+			if _, ok := skipDevices[d.DeviceId]; !ok && d.DeviceId != "" {
+				msg.To[d.DeviceId] = rcpt.To[uid]
+			}
+		}
+	}
+
+	return &msg, -100, nil
+}
+
 func postMessage(rcpt *push.Receipt, config *configType) (*batchResponse, error) {
 
-	buf, err := json.Marshal(rcpt)
+	msg, count, err := PrepareNotifications(rcpt)
+	if err != nil {
+		return nil, err
+	}
+
+	if count == 0 {
+		return &batchResponse{nothingSend: true}, nil
+	}
+
+	buf, err := json.Marshal(msg)
 	if err != nil {
 		return nil, err
 	}
@@ -127,6 +189,8 @@ func postMessage(rcpt *push.Receipt, config *configType) (*batchResponse, error)
 func sendPushes(rcpt *push.Receipt, config *configType) {
 	if resp, err := postMessage(rcpt, config); err != nil {
 		log.Println("custom push request failed:", err)
+	} else if resp.nothingSend {
+		log.Println("custom push: nothing to send")
 	} else if resp.httpCode >= 300 {
 		log.Println("custom push rejected:", resp.httpStatus)
 	} else if resp.FatalCode != "" {
