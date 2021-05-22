@@ -22,6 +22,10 @@ const (
 
 var handler Handler
 
+type getAll func(uid ...t.Uid) (map[t.Uid][]t.DeviceDef, int, error)
+
+var devicesGetAll getAll
+
 // Handler represents state of TNPG push client.
 type Handler struct {
 	input   chan *push.Receipt
@@ -96,6 +100,8 @@ func (Handler) Init(jsonconf string) error {
 	handler.input = make(chan *push.Receipt, bufferSize)
 	handler.stop = make(chan bool, 1)
 
+	devicesGetAll = store.Devices.GetAll
+
 	go func() {
 		for {
 			select {
@@ -114,6 +120,7 @@ func PrepareNotifications(rcpt *push.Receipt) (*message, int, error) {
 
 	msg := message{
 		Payload: rcpt.Payload,
+		To:      make(map[string]push.Recipient),
 	}
 
 	// List of UIDs for querying the database
@@ -130,7 +137,7 @@ func PrepareNotifications(rcpt *push.Receipt) (*message, int, error) {
 		}
 	}
 
-	devices, count, err := store.Devices.GetAll(uids...)
+	devices, count, err := devicesGetAll(uids...)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -148,7 +155,10 @@ func PrepareNotifications(rcpt *push.Receipt) (*message, int, error) {
 		for i := range devList {
 			d := &devList[i]
 			if _, ok := skipDevices[d.DeviceId]; !ok && d.DeviceId != "" {
-				msg.To[d.DeviceId] = rcpt.To[uid]
+				msg.To[d.DeviceId] = push.Recipient{
+					Delivered: rcpt.To[uid].Delivered,
+					Unread:    rcpt.To[uid].Unread,
+				}
 			}
 		}
 	}
