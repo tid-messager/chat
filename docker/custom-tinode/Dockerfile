@@ -9,15 +9,15 @@
 #	--env AUTH_TOKEN_KEY=base64+encoded+32+bytes \
 #	tinode-server
 
-FROM alpine:3.11.6
+FROM alpine:3.13
 
-ARG VERSION=0.16
-ENV VERSION=0.16.5
-ARG BINVERS=0.16.5
+ARG VERSION=0.17.1
+ENV VERSION=$VERSION
+ARG BINVERS=$VERSION
 
 LABEL maintainer="Tinode Team <info@tinode.co>"
 LABEL name="TinodeChatServer"
-LABEL version=0.16.5
+LABEL version=$VERSION
 
 # Build-time options.
 
