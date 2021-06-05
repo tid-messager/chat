@@ -21,11 +21,12 @@ func genDb(data *Data) {
 
 	if len(data.Users) == 0 {
 		log.Println("No data provided, stopping")
+
 		return
 	}
 
 	// Add authentication record
-	authHandler := store.GetAuthHandler("basic")
+	authHandler := store.Store.GetAuthHandler("basic")
 	authHandler.Init([]byte(`{"add_to_tags": true}`), "basic")
 
 	nameIndex := make(map[string]string, len(data.Users))
@@ -92,7 +93,7 @@ func genDb(data *Data) {
 			}
 		}
 		// Add authentication record
-		authHandler := store.GetAuthHandler("basic")
+		authHandler := store.Store.GetAuthHandler("basic")
 		passwd := uu.Password
 		if passwd == "(random)" {
 			// Generate random password
@@ -100,8 +101,7 @@ func genDb(data *Data) {
 			botAccount = uu.Username
 		}
 		if _, err := authHandler.AddRecord(&auth.Rec{Uid: user.Uid(), AuthLevel: authLevel},
-			[]byte(uu.Username+":"+passwd)); err != nil {
-
+			[]byte(uu.Username+":"+passwd), ""); err != nil {
 			log.Fatal(err)
 		}
 		nameIndex[uu.Username] = user.Id
@@ -109,8 +109,7 @@ func genDb(data *Data) {
 		// Add address book as fnd.private
 		if uu.AddressBook != nil && len(uu.AddressBook) > 0 {
 			if err := store.Subs.Update(user.Uid().FndName(), user.Uid(),
-				map[string]interface{}{"Private": strings.Join(uu.AddressBook, ",")}, true); err != nil {
-
+				map[string]interface{}{"Private": strings.Join(uu.AddressBook, ",")}); err != nil {
 				log.Fatal(err)
 			}
 		}
@@ -146,6 +145,7 @@ func genDb(data *Data) {
 				Auth: accessAuth,
 				Anon: accessAnon,
 			},
+			UseBt:  gt.Channel,
 			Tags:   gt.Tags,
 			Public: parsePublic(&gt.Public, data.datapath)}
 		var owner types.Uid
@@ -234,9 +234,14 @@ func genDb(data *Data) {
 	log.Println("Generating group subscriptions...")
 
 	for _, ss := range data.Groupsubs {
-
-		want := types.ModeCPublic
-		given := types.ModeCPublic
+		var want, given types.AccessMode
+		if ss.AsChan {
+			want = types.ModeCChnReader
+			given = types.ModeCChnReader
+		} else {
+			want = types.ModeCPublic
+			given = types.ModeCPublic
+		}
 		if ss.Want != "" {
 			if err := want.UnmarshalText([]byte(ss.Want)); err != nil {
 				log.Fatal(err)
@@ -247,11 +252,14 @@ func genDb(data *Data) {
 				log.Fatal(err)
 			}
 		}
-
+		tname := nameIndex[ss.Topic]
+		if ss.AsChan {
+			tname = types.GrpToChn(tname)
+		}
 		if err = store.Subs.Create(&types.Subscription{
 			ObjHeader: types.ObjHeader{CreatedAt: getCreatedTime(ss.CreatedAt)},
 			User:      nameIndex[ss.User],
-			Topic:     nameIndex[ss.Topic],
+			Topic:     tname,
 			ModeWant:  want,
 			ModeGiven: given,
 			Private:   ss.Private}); err != nil {
@@ -288,6 +296,10 @@ func genDb(data *Data) {
 				var topic string
 				var from types.Uid
 				if subIdx < len(data.Groupsubs) {
+					if data.Groupsubs[subIdx].AsChan {
+						// Channel readers should not have any published messages.
+						continue
+					}
 					topic = nameIndex[data.Groupsubs[subIdx].Topic]
 					from = types.ParseUid(nameIndex[data.Groupsubs[subIdx].User])
 				} else {
@@ -389,6 +401,7 @@ func getCreatedTime(delta string) time.Time {
 	if err != nil && delta != "" {
 		log.Fatal("Invalid duration string", delta)
 	}
+
 	return time.Now().UTC().Round(time.Millisecond).Add(dd)
 }
 
@@ -411,8 +424,7 @@ func parsePublic(public *vCardy, path string) *vcard {
 		return nil
 	}
 
-	fname := public.Photo
-	if fname != "" {
+	if fname := public.Photo; fname != "" {
 		photo = &photoStruct{Type: public.Type}
 		dir, _ := filepath.Split(fname)
 		if dir == "" {

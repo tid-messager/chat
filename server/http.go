@@ -14,7 +14,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -25,6 +24,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/tinode/chat/server/logs"
 	"github.com/tinode/chat/server/store"
 	"github.com/tinode/chat/server/store/types"
 )
@@ -52,9 +52,9 @@ func listenAndServe(addr string, mux *http.ServeMux, tlfConf *tls.Config, stop <
 			if globals.tlsRedirectHTTP != "" {
 				// Serving redirects from a unix socket or to a unix socket makes no sense.
 				if isUnixAddr(globals.tlsRedirectHTTP) || isUnixAddr(addr) {
-					err = errors.New("HTTP to HTTPS redirect: unix sockets not supported.")
+					err = errors.New("HTTP to HTTPS redirect: unix sockets not supported")
 				} else {
-					log.Printf("Redirecting connections from HTTP at [%s] to HTTPS at [%s]",
+					logs.Info.Printf("Redirecting connections from HTTP at [%s] to HTTPS at [%s]",
 						globals.tlsRedirectHTTP, addr)
 
 					// This is a second HTTP server listenning on a different port.
@@ -63,7 +63,7 @@ func listenAndServe(addr string, mux *http.ServeMux, tlfConf *tls.Config, stop <
 			}
 
 			if err == nil {
-				log.Printf("Listening for client HTTPS connections on [%s]", addr)
+				logs.Info.Printf("Listening for client HTTPS connections on [%s]", addr)
 				var lis net.Listener
 				lis, err = netListener(addr)
 				if err == nil {
@@ -71,7 +71,7 @@ func listenAndServe(addr string, mux *http.ServeMux, tlfConf *tls.Config, stop <
 				}
 			}
 		} else {
-			log.Printf("Listening for client HTTP connections on [%s]", addr)
+			logs.Info.Printf("Listening for client HTTP connections on [%s]", addr)
 			var lis net.Listener
 			lis, err = netListener(addr)
 			if err == nil {
@@ -81,9 +81,9 @@ func listenAndServe(addr string, mux *http.ServeMux, tlfConf *tls.Config, stop <
 
 		if err != nil {
 			if globals.shuttingDown {
-				log.Println("HTTP server: stopped")
+				logs.Info.Println("HTTP server: stopped")
 			} else {
-				log.Println("HTTP server: failed", err)
+				logs.Err.Println("HTTP server: failed", err)
 			}
 		}
 		httpdone <- true
@@ -100,7 +100,7 @@ Loop:
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 			if err := server.Shutdown(ctx); err != nil {
 				// failure/timeout shutting down the server gracefully
-				log.Println("HTTP server failed to terminate gracefully", err)
+				logs.Err.Println("HTTP server failed to terminate gracefully", err)
 			}
 
 			// While the server shuts down, termianate all sessions.
@@ -153,7 +153,7 @@ func signalHandler() <-chan bool {
 	go func() {
 		// Wait for a signal. Don't care which signal it is
 		sig := <-signchan
-		log.Printf("Signal received: '%s', shutting down", sig)
+		logs.Info.Printf("Signal received: '%s', shutting down", sig)
 		stop <- true
 	}()
 
@@ -193,10 +193,13 @@ func (w *errorResponseWriter) WriteHeader(status int) {
 func (w *errorResponseWriter) Write(p []byte) (n int, err error) {
 	if w.status >= http.StatusBadRequest {
 		p, _ = json.Marshal(
-			&ServerComMessage{Ctrl: &MsgServerCtrl{
-				Timestamp: time.Now().UTC().Round(time.Millisecond),
-				Code:      w.status,
-				Text:      http.StatusText(w.status)}})
+			&ServerComMessage{
+				Ctrl: &MsgServerCtrl{
+					Timestamp: time.Now().UTC().Round(time.Millisecond),
+					Code:      w.status,
+					Text:      http.StatusText(w.status),
+				},
+			})
 	}
 	return w.ResponseWriter.Write(p)
 }
@@ -214,10 +217,13 @@ func serve404(wrt http.ResponseWriter, req *http.Request) {
 	wrt.Header().Set("Content-Type", "application/json; charset=utf-8")
 	wrt.WriteHeader(http.StatusNotFound)
 	json.NewEncoder(wrt).Encode(
-		&ServerComMessage{Ctrl: &MsgServerCtrl{
-			Timestamp: time.Now().UTC().Round(time.Millisecond),
-			Code:      http.StatusNotFound,
-			Text:      "not found"}})
+		&ServerComMessage{
+			Ctrl: &MsgServerCtrl{
+				Timestamp: time.Now().UTC().Round(time.Millisecond),
+				Code:      http.StatusNotFound,
+				Text:      "not found",
+			},
+		})
 }
 
 // Redirect HTTP requests to HTTPS
@@ -309,6 +315,8 @@ func getHttpAuth(req *http.Request) (method, secret string) {
 	// Check URL query parameters.
 	if method = req.URL.Query().Get("auth"); method != "" {
 		secret = req.URL.Query().Get("secret")
+		// Convert base64 URL-encoding to standard encoding.
+		secret = strings.NewReplacer("-", "+", "_", "/").Replace(secret)
 		return
 	}
 
@@ -337,8 +345,8 @@ func authHttpRequest(req *http.Request) (types.Uid, []byte, error) {
 			return uid, nil, types.ErrMalformed
 		}
 
-		if authhdl := store.GetLogicalAuthHandler(authMethod); authhdl != nil {
-			rec, challenge, err := authhdl.Authenticate(decodedSecret[:n])
+		if authhdl := store.Store.GetLogicalAuthHandler(authMethod); authhdl != nil {
+			rec, challenge, err := authhdl.Authenticate(decodedSecret[:n], getRemoteAddr(req))
 			if err != nil {
 				return uid, nil, err
 			}
@@ -347,7 +355,7 @@ func authHttpRequest(req *http.Request) (types.Uid, []byte, error) {
 			}
 			uid = rec.Uid
 		} else {
-			log.Println("fileUpload: auth data is present but handler is not found", authMethod)
+			logs.Info.Println("fileUpload: auth data is present but handler is not found", authMethod)
 		}
 	} else {
 		// Find the session, make sure it's appropriately authenticated.

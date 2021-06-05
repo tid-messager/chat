@@ -9,15 +9,15 @@
 #	--env AUTH_TOKEN_KEY=base64+encoded+32+bytes \
 #	tinode-server
 
-FROM alpine:3.11
+FROM alpine:3.13
 
-ARG VERSION=0.16
-ENV VERSION=0.16.5
-ARG BINVERS=0.16.5
+ARG VERSION=0.17
+ENV VERSION=$VERSION
+ARG BINVERS=$VERSION
 
 LABEL maintainer="Tinode Team <info@tinode.co>"
 LABEL name="TinodeChatServer"
-LABEL version=0.16.5
+LABEL version=$VERSION
 
 # Build-time options.
 
@@ -26,7 +26,7 @@ LABEL version=0.16.5
 # `--build-arg TARGET_DB=mysql` to build for MySQL or
 # `--build-arg TARGET_DB=mongodb` to build for MongoDB.
 # `--build-arg TARGET_DB=alldbs` to build a generic Tinode docker image.
-ARG TARGET_DB=mongodb
+ARG TARGET_DB=rethinkdb
 ENV TARGET_DB=$TARGET_DB
 
 # Runtime options.
@@ -106,6 +106,10 @@ ENV TNPG_ORG=
 # When TARGET_DB is "alldbs", it is the user's responsibility
 # to set STORE_USE_ADAPTER to the desired db adapter correctly.
 ENV STORE_USE_ADAPTER=$TARGET_DB
+
+# Number of the goroutines processing topic master responses to the topic proxies.
+# If 0, default value wll be used: # of nodes x 5.
+ENV CLUSTER_NUM_PROXY_EVENT_GOROUTINES=0
 
 # Install root certificates, they are needed for email validator to work
 # with the TLS SMTP servers like Gmail or Mailjet. Also add bash and grep.

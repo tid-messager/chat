@@ -19,12 +19,21 @@ import (
 	"unicode/utf8"
 
 	"github.com/tinode/chat/server/auth"
+	"github.com/tinode/chat/server/logs"
+	"github.com/tinode/chat/server/store"
 	"github.com/tinode/chat/server/store/types"
 
 	"golang.org/x/crypto/acme/autocert"
 )
 
-var tagPrefixRegexp = regexp.MustCompile(`^([a-z]\w{0,5}):\S`)
+// Tag with prefix:
+// * prefix starts with an ASCII letter, contains ASCII letters, numbers, from 2 to 16 chars
+// * tag body may contain Unicode letters and numbers, as well as the following symbols: +-.!?#@_
+// Tag body can be up to maxTagLength (96) chars long.
+var prefixedTagRegexp = regexp.MustCompile(`^([a-z]\w{1,15}):[-_+.!?#@\pL\pN]{1,96}$`)
+
+// Generic tag: the same restrictions as tag body.
+var tagRegexp = regexp.MustCompile(`^[-_+.!?#@\pL\pN]{1,96}$`)
 
 const nullValue = "\u2421"
 
@@ -34,7 +43,7 @@ func delrangeDeserialize(in []types.Range) []MsgDelRange {
 		return nil
 	}
 
-	var out []MsgDelRange
+	out := make([]MsgDelRange, 0, len(in))
 	for _, r := range in {
 		out = append(out, MsgDelRange{LowId: r.Low, HiId: r.Hi})
 	}
@@ -185,29 +194,9 @@ func normalizeCredentials(creds []MsgCredClient, valueRequired bool) []MsgCredCl
 
 // Get a string slice with methods of credentials.
 func credentialMethods(creds []MsgCredClient) []string {
-	var out []string
+	out := make([]string, len(creds))
 	for i := range creds {
-		out = append(out, creds[i].Method)
-	}
-	return out
-}
-
-// Take a slice of tags, return a slice of restricted namespace tags contained in the input.
-// Tags to filter, restricted namespaces to filter.
-func filterRestrictedTags(tags []string, namespaces map[string]bool) []string {
-	var out []string
-	if len(namespaces) > 0 && len(tags) > 0 {
-		for _, s := range tags {
-			parts := tagPrefixRegexp.FindStringSubmatch(s)
-
-			if len(parts) < 2 {
-				continue
-			}
-
-			if namespaces[parts[1]] {
-				out = append(out, s)
-			}
-		}
+		out[i] = creds[i].Method
 	}
 	return out
 }
@@ -236,45 +225,52 @@ func isNullValue(i interface{}) bool {
 	return false
 }
 
-func decodeStoreError(err error, id, topic string, timestamp time.Time,
+func decodeStoreError(err error, id, topic string, ts time.Time,
+	params map[string]interface{}) *ServerComMessage {
+	return decodeStoreErrorExplicitTs(err, id, topic, ts, ts, params)
+}
+
+func decodeStoreErrorExplicitTs(err error, id, topic string, serverTs, incomingReqTs time.Time,
 	params map[string]interface{}) *ServerComMessage {
 
 	var errmsg *ServerComMessage
 
 	if err == nil {
-		errmsg = NoErr(id, topic, timestamp)
+		errmsg = NoErrExplicitTs(id, topic, serverTs, incomingReqTs)
 	} else if storeErr, ok := err.(types.StoreError); !ok {
-		errmsg = ErrUnknown(id, topic, timestamp)
+		errmsg = ErrUnknownExplicitTs(id, topic, serverTs, incomingReqTs)
 	} else {
 		switch storeErr {
 		case types.ErrInternal:
-			errmsg = ErrUnknown(id, topic, timestamp)
+			errmsg = ErrUnknownExplicitTs(id, topic, serverTs, incomingReqTs)
 		case types.ErrMalformed:
-			errmsg = ErrMalformed(id, topic, timestamp)
+			errmsg = ErrMalformedExplicitTs(id, topic, serverTs, incomingReqTs)
 		case types.ErrFailed:
-			errmsg = ErrAuthFailed(id, topic, timestamp)
+			errmsg = ErrAuthFailed(id, topic, serverTs, incomingReqTs)
 		case types.ErrPermissionDenied:
-			errmsg = ErrPermissionDenied(id, topic, timestamp)
+			errmsg = ErrPermissionDeniedExplicitTs(id, topic, serverTs, incomingReqTs)
 		case types.ErrDuplicate:
-			errmsg = ErrDuplicateCredential(id, topic, timestamp)
+			errmsg = ErrDuplicateCredential(id, topic, serverTs, incomingReqTs)
 		case types.ErrUnsupported:
-			errmsg = ErrNotImplemented(id, topic, timestamp)
+			errmsg = ErrNotImplemented(id, topic, serverTs, incomingReqTs)
 		case types.ErrExpired:
-			errmsg = ErrAuthFailed(id, topic, timestamp)
+			errmsg = ErrAuthFailed(id, topic, serverTs, incomingReqTs)
 		case types.ErrPolicy:
-			errmsg = ErrPolicy(id, topic, timestamp)
+			errmsg = ErrPolicyExplicitTs(id, topic, serverTs, incomingReqTs)
 		case types.ErrCredentials:
-			errmsg = InfoValidateCredentials(id, timestamp)
+			errmsg = InfoValidateCredentialsExplicitTs(id, serverTs, incomingReqTs)
 		case types.ErrUserNotFound:
-			errmsg = ErrUserNotFound(id, topic, timestamp)
+			errmsg = ErrUserNotFound(id, topic, serverTs, incomingReqTs)
 		case types.ErrTopicNotFound:
-			errmsg = ErrTopicNotFound(id, topic, timestamp)
+			errmsg = ErrTopicNotFound(id, topic, serverTs, incomingReqTs)
 		case types.ErrNotFound:
-			errmsg = ErrNotFound(id, topic, timestamp)
+			errmsg = ErrNotFoundExplicitTs(id, topic, serverTs, incomingReqTs)
 		case types.ErrInvalidResponse:
-			errmsg = ErrInvalidResponse(id, topic, timestamp)
+			errmsg = ErrInvalidResponse(id, topic, serverTs, incomingReqTs)
+		case types.ErrRedirected:
+			errmsg = InfoUseOther(id, topic, params["topic"].(string), serverTs, incomingReqTs)
 		default:
-			errmsg = ErrUnknown(id, topic, timestamp)
+			errmsg = ErrUnknownExplicitTs(id, topic, serverTs, incomingReqTs)
 		}
 	}
 
@@ -302,7 +298,7 @@ func selectAccessMode(authLvl auth.Level, anonMode, authMode, rootMode types.Acc
 }
 
 // Get default modeWant for the given topic category
-func getDefaultAccess(cat types.TopicCat, authUser bool) types.AccessMode {
+func getDefaultAccess(cat types.TopicCat, authUser, isChan bool) types.AccessMode {
 	if !authUser {
 		return types.ModeNone
 	}
@@ -313,6 +309,9 @@ func getDefaultAccess(cat types.TopicCat, authUser bool) types.AccessMode {
 	case types.TopicCatFnd:
 		return types.ModeNone
 	case types.TopicCatGrp:
+		if isChan {
+			return types.ModeCChnWriter
+		}
 		return types.ModeCPublic
 	case types.TopicCatMe:
 		return types.ModeCSelf
@@ -361,10 +360,9 @@ func parseVersionPart(vers string) int {
 // Unparceable values are replaced with zeros.
 func parseVersion(vers string) int {
 	var major, minor, patch int
-	// Remove optional "v" prefix.
-	if strings.HasPrefix(vers, "v") {
-		vers = vers[1:]
-	}
+	// Maybe remove the optional "v" prefix.
+	vers = strings.TrimPrefix(vers, "v")
+
 	// We can handle 3 parts only.
 	parts := strings.SplitN(vers, ".", 3)
 	count := len(parts)
@@ -397,10 +395,79 @@ func versionToString(vers int) string {
 	return str
 }
 
-// Parser for search queries. The query may contain non-ASCII
-// characters, i.e. length of string in bytes != length of string in runes.
-// Returns AND tags (all must be present in every result), OR tags (one or more present), error.
-func parseSearchQuery(query string) ([]string, []string, error) {
+// Tag handling
+
+// Take a slice of tags, return a slice of restricted namespace tags contained in the input.
+// Tags to filter, restricted namespaces to filter.
+func filterRestrictedTags(tags []string, namespaces map[string]bool) []string {
+	var out []string
+	if len(namespaces) == 0 {
+		return out
+	}
+
+	for _, s := range tags {
+		parts := prefixedTagRegexp.FindStringSubmatch(s)
+
+		if len(parts) < 2 {
+			continue
+		}
+
+		if namespaces[parts[1]] {
+			out = append(out, s)
+		}
+	}
+
+	return out
+}
+
+// rewriteToken attempts to match the original token against the email, telephone number and optionally login patterns.
+// The tag is expected to be converted to lowercase.
+// On success, it prepends the token with the corresponding prefix. It returns an empty string if the tag is invalid.
+// TODO: consider inferring country code from user location.
+func rewriteTag(orig, countryCode string, withLogin bool) string {
+	// Check if the tag already has a prefix e.g. basic:alice.
+	if prefixedTagRegexp.MatchString(orig) {
+		return orig
+	}
+
+	// Check if token can be rewritten by any of the validators
+	param := map[string]interface{}{"countryCode": countryCode}
+	for name, conf := range globals.validators {
+		if conf.addToTags {
+			val := store.Store.GetValidator(name)
+			if tag, _ := val.PreCheck(orig, param); tag != "" {
+				return tag
+			}
+		}
+	}
+
+	// Try authenticators now.
+	if withLogin {
+		auths := store.Store.GetAuthNames()
+		for _, name := range auths {
+			auth := store.Store.GetAuthHandler(name)
+			if tag := auth.AsTag(orig); tag != "" {
+				return tag
+			}
+		}
+	}
+
+	if tagRegexp.MatchString(orig) {
+		return orig
+	}
+
+	logs.Warn.Printf("invalid generic tag '%s'", orig)
+
+	return ""
+}
+
+// Parser for search queries. The query may contain non-ASCII characters,
+// i.e. length of string in bytes != length of string in runes.
+// Returns
+// * required tags: AND of ORs of tags (at least one of each subset must be present in every result),
+// * optional tags
+// * error.
+func parseSearchQuery(query, countryCode string, withLogin bool) ([][]string, []string, error) {
 	const (
 		NONE = iota
 		QUO
@@ -410,8 +477,9 @@ func parseSearchQuery(query string) ([]string, []string, error) {
 		ORD
 	)
 	type token struct {
-		op  int
-		val string
+		op           int
+		val          string
+		rewrittenVal string
 	}
 	type context struct {
 		// Pre-token operand
@@ -427,7 +495,7 @@ func parseSearchQuery(query string) ([]string, []string, error) {
 		// End of the current token
 		end int
 	}
-	var ctx = context{preOp: AND}
+	ctx := context{preOp: AND}
 	var out []token
 	var prev int
 	query = strings.TrimSpace(query)
@@ -522,7 +590,16 @@ func parseSearchQuery(query string) ([]string, []string, error) {
 			}
 			// Add token if non-empty.
 			if start < end {
-				out = append(out, token{val: query[start:end], op: op})
+				original := strings.ToLower(query[start:end])
+				rewritten := rewriteTag(original, countryCode, withLogin)
+				// The 'rewritten' equals to "" means the token is invalid.
+				if rewritten != "" {
+					t := token{val: original, op: op}
+					if rewritten != original {
+						t.rewrittenVal = rewritten
+					}
+					out = append(out, t)
+				}
 			}
 			ctx.start = i
 			ctx.preOp = ctx.postOp
@@ -538,13 +615,22 @@ func parseSearchQuery(query string) ([]string, []string, error) {
 	}
 
 	// Convert tokens to two string slices.
-	var and, or []string
+	var and [][]string
+	var or []string
 	for _, t := range out {
 		switch t.op {
 		case AND:
-			and = append(and, t.val)
+			var terms []string
+			terms = append(terms, t.val)
+			if len(t.rewrittenVal) > 0 {
+				terms = append(terms, t.rewrittenVal)
+			}
+			and = append(and, terms)
 		case OR:
 			or = append(or, t.val)
+			if len(t.rewrittenVal) > 0 {
+				or = append(or, t.rewrittenVal)
+			}
 		}
 	}
 	return and, or, nil
@@ -661,6 +747,7 @@ func parseTLSConfig(tlsEnabled bool, jsconfig json.RawMessage) (*tls.Config, err
 	if err != nil {
 		return nil, err
 	}
+
 	return &tls.Config{Certificates: []tls.Certificate{cert}}, nil
 }
 

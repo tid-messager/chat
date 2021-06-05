@@ -81,12 +81,14 @@ GroupTopic object in data.json
    "createdAt": "-128h",
    "name": "*ABC",
    "owner": "carol",
+   "channel": true,
    "public": {"fn": "Let's talk about flowers", "photo": "abc-64.jpg", "type": "jpg"}
 */
 type GroupTopic struct {
 	CreatedAt    string    `json:"createdAt"`
 	Name         string    `json:"name"`
 	Owner        string    `json:"owner"`
+	Channel      bool      `json:"channel"`
 	Public       vCardy    `json:"public"`
 	Access       DefAccess `json:"access"`
 	Tags         []string  `json:"tags"`
@@ -99,16 +101,17 @@ GroupSub object in data.json
  "createdAt": "-112h",
  "private": "My super cool group topic",
  "topic": "*ABC",
- "user": "alice"
+ "user": "alice",
+ "asChan: false,
  "want": "JRWPSA",
- "have": "JRWP",
- "tags": ["super cool", "super", "cool"],
+ "have": "JRWP"
 */
 type GroupSub struct {
 	CreatedAt string   `json:"createdAt"`
 	Private   tPrivate `json:"private"`
 	Topic     string   `json:"topic"`
 	User      string   `json:"user"`
+	AsChan    bool     `json:"asChan"`
 	Want      string   `json:"want"`
 	Have      string   `json:"have"`
 }
@@ -150,7 +153,7 @@ type Data struct {
 
 // Generate random string as a name of the group topic
 func genTopicName() string {
-	return "grp" + store.GetUidString()
+	return "grp" + store.Store.GetUidString()
 }
 
 // Generates password of length n
@@ -161,15 +164,16 @@ func getPassword(n int) string {
 	for i := range b {
 		b[i] = letters[rand.Intn(len(letters))]
 	}
+
 	return string(b)
 }
 
 func main() {
-	var reset = flag.Bool("reset", false, "force database reset")
-	var upgrade = flag.Bool("upgrade", false, "perform database version upgrade")
-	var noInit = flag.Bool("no_init", false, "check that database exists but don't create if missing")
-	var datafile = flag.String("data", "", "name of file with sample data to load")
-	var conffile = flag.String("config", "./tinode.conf", "config of the database connection")
+	reset := flag.Bool("reset", false, "force database reset")
+	upgrade := flag.Bool("upgrade", false, "perform database version upgrade")
+	noInit := flag.Bool("no_init", false, "check that database exists but don't create if missing")
+	datafile := flag.String("data", "", "name of file with sample data to load")
+	conffile := flag.String("config", "./tinode.conf", "config of the database connection")
 
 	flag.Parse()
 
@@ -209,10 +213,10 @@ func main() {
 		}
 	}
 
-	err := store.Open(1, config.StoreConfig)
-	defer store.Close()
+	err := store.Store.Open(1, config.StoreConfig)
+	defer store.Store.Close()
 
-	log.Println("Database", store.GetAdapterName(), store.GetAdapterVersion())
+	log.Println("Database", store.Store.GetAdapterName(), store.Store.GetAdapterVersion())
 
 	if err != nil {
 		if strings.Contains(err.Error(), "Database not initialized") {
@@ -221,8 +225,8 @@ func main() {
 			}
 			log.Println("Database not found. Creating.")
 		} else if strings.Contains(err.Error(), "Invalid database version") {
-			msg := "Wrong DB version: expected " + strconv.Itoa(store.GetAdapterVersion()) + ", got " +
-				strconv.Itoa(store.GetDbVersion()) + "."
+			msg := "Wrong DB version: expected " + strconv.Itoa(store.Store.GetAdapterVersion()) + ", got " +
+				strconv.Itoa(store.Store.GetDbVersion()) + "."
 			if *reset {
 				log.Println(msg, "Dropping and recreating the database.")
 			} else if *upgrade {
@@ -242,13 +246,13 @@ func main() {
 
 	if *upgrade {
 		// Upgrade DB from one version to another.
-		err = store.UpgradeDb(config.StoreConfig)
+		err = store.Store.UpgradeDb(config.StoreConfig)
 		if err == nil {
 			log.Println("Database successfully upgraded.")
 		}
 	} else {
 		// Reset or create DB
-		err = store.InitDb(config.StoreConfig, true)
+		err = store.Store.InitDb(config.StoreConfig, true)
 		if err == nil {
 			var action string
 			if *reset {

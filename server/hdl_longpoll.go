@@ -13,30 +13,60 @@ import (
 	"encoding/json"
 	"errors"
 	"io/ioutil"
-	"log"
 	"net/http"
 	"time"
+
+	"github.com/tinode/chat/server/logs"
 )
 
-func (sess *Session) writeOnce(wrt http.ResponseWriter, req *http.Request) {
+func (sess *Session) sendMessageLp(wrt http.ResponseWriter, msg interface{}) bool {
+	if len(sess.send) > sendQueueLimit {
+		logs.Err.Println("longPoll: outbound queue limit exceeded", sess.sid)
+		return false
+	}
 
+	statsInc("OutgoingMessagesLongpollTotal", 1)
+	if err := lpWrite(wrt, msg); err != nil {
+		logs.Err.Println("longPoll: writeOnce failed", sess.sid, err)
+		return false
+	}
+
+	return true
+}
+
+func (sess *Session) writeOnce(wrt http.ResponseWriter, req *http.Request) {
 	for {
 		select {
 		case msg, ok := <-sess.send:
-			if ok {
-				if len(sess.send) > sendQueueLimit {
-					log.Println("longPoll: outbound queue limit exceeded", sess.sid)
-				} else if err := lpWrite(wrt, msg); err != nil {
-					log.Println("longPoll: writeOnce failed", sess.sid, err)
+			if !ok {
+				return
+			}
+			switch v := msg.(type) {
+			case *ServerComMessage: // single unserialized message
+				w := sess.serializeAndUpdateStats(v)
+				if !sess.sendMessageLp(wrt, w) {
+					return
+				}
+			default: // serialized message
+				if !sess.sendMessageLp(wrt, v) {
+					return
 				}
 			}
 			return
+
+		case <-sess.bkgTimer.C:
+			if sess.background {
+				sess.background = false
+				sess.onBackgroundTimer()
+			}
 
 		case msg := <-sess.stop:
 			// Request to close the session. Make it unavailable.
 			globals.sessionStore.Delete(sess)
 			// Don't care if lpWrite fails.
-			lpWrite(wrt, msg)
+			if msg != nil {
+				lpWrite(wrt, msg)
+			}
 			return
 
 		case topic := <-sess.detach:
@@ -47,12 +77,12 @@ func (sess *Session) writeOnce(wrt http.ResponseWriter, req *http.Request) {
 		case <-time.After(pingPeriod):
 			// just write an empty packet on timeout
 			if _, err := wrt.Write([]byte{}); err != nil {
-				log.Println("longPoll: writeOnce: timout", sess.sid, err)
+				logs.Err.Println("longPoll: writeOnce: timout", sess.sid, err)
 			}
 			return
 
 		case <-req.Context().Done():
-			// HTTP request cancelled or connection lost.
+			// HTTP request canceled or connection lost.
 			return
 		}
 	}
@@ -75,6 +105,7 @@ func (sess *Session) readOnce(wrt http.ResponseWriter, req *http.Request) (int, 
 		// Locking-unlocking is needed because the client may issue multiple requests in parallel.
 		// Should not affect performance
 		sess.lock.Lock()
+		statsInc("IncomingMessagesLongpollTotal", 1)
 		sess.dispatchRaw(raw)
 		sess.lock.Unlock()
 		return 0, nil
@@ -128,7 +159,9 @@ func serveLongPoll(wrt http.ResponseWriter, req *http.Request) {
 		// New session
 		var count int
 		sess, count = globals.sessionStore.NewSession(wrt, "")
-		log.Println("longPoll: session started", sess.sid, count)
+		sess.remoteAddr = getRemoteAddr(req)
+		logs.Info.Println("longPoll: session started", sess.sid, sess.remoteAddr, count)
+
 		wrt.WriteHeader(http.StatusCreated)
 		pkt := NoErrCreated(req.FormValue("id"), "", now)
 		pkt.Ctrl.Params = map[string]string{
@@ -142,19 +175,21 @@ func serveLongPoll(wrt http.ResponseWriter, req *http.Request) {
 	// Existing session
 	sess = globals.sessionStore.Get(sid)
 	if sess == nil {
-		log.Println("longPoll: invalid or expired session id", sid)
+		logs.Warn.Println("longPoll: invalid or expired session id", sid)
 		wrt.WriteHeader(http.StatusForbidden)
 		enc.Encode(ErrSessionNotFound(now))
 		return
 	}
 
-	// FIXME: this is a race condition. Lock session before.
-	sess.remoteAddr = req.RemoteAddr
+	if addr := getRemoteAddr(req); sess.remoteAddr != addr {
+		sess.remoteAddr = addr
+		logs.Warn.Println("longPoll: remote address changed", sid, addr)
+	}
 
 	if req.ContentLength != 0 {
 		// Read payload and send it for processing.
 		if code, err := sess.readOnce(wrt, req); err != nil {
-			log.Println("longPoll: readOnce failed", sess.sid, err)
+			logs.Warn.Println("longPoll: readOnce failed", sess.sid, err)
 			// Failed to read request, report an error, if possible
 			if code != 0 {
 				wrt.WriteHeader(code)
@@ -167,4 +202,16 @@ func serveLongPoll(wrt http.ResponseWriter, req *http.Request) {
 	}
 
 	sess.writeOnce(wrt, req)
+}
+
+// Obtain IP address of the client.
+func getRemoteAddr(req *http.Request) string {
+	var addr string
+	if globals.useXForwardedFor {
+		addr = req.Header.Get("X-Forwarded-For")
+	}
+	if addr != "" {
+		return addr
+	}
+	return req.RemoteAddr
 }

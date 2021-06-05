@@ -14,7 +14,8 @@ Fields:
 * `Access` user's default access level for peer-to-peer topics
  * `Auth`, `Anon` default permissions for authenticated and anonymous users
 * `Public` application-defined data
-* `State` currently unused
+* `State` state of the user: normal, disabled, deleted
+* `StateAt` timestamp when the state was last updated or NULL
 * `LastSeen` timestamp when the user was last online
 * `UserAgent` client User-Agent used when last online
 * `Tags` unique strings for user discovery
@@ -99,10 +100,10 @@ Fields:
   * `Auth`, `Anon` permissions for authenticated and anonymous users respectively
  * `Owner` ID of the user who owns the topic
  * `Public` application-defined data
- * `State` currently unused
+ * `State` state of the topic: normal, disabled, deleted
  * `SeqId` sequential ID of the last message
  * `DelId` topic-sequential ID of the deletion operation
- * `UseBt` currently unused
+ * `UseBt` indicator that channel functionality is enabled in the topic
 
 Indexes:
 * `Id` primary key
@@ -141,11 +142,11 @@ The table stores relationships between users and topics.
 
 Fields:
  * `Id` used for object retrieval
- * `CreatedAt` timestamp when the user was created
- * `UpdatedAt` timestamp when user metadata was updated
- * `DeletedAt` currently unused
+ * `CreatedAt` timestamp when the subscription was created
+ * `UpdatedAt` timestamp when the subscription was updated
+ * `DeletedAt` timestamp when the subscription was deleted
  * `ReadSeqId` id of the message last read by the user
- * `RecvSeqId` id of the message last received by user device
+ * `RecvSeqId` id of the message last received by any user device
  * `DelId` topic-sequential ID of the soft-deletion operation
  * `Topic` name of the topic subscribed to
  * `User` subscriber's user ID

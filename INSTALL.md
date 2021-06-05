@@ -1,5 +1,7 @@
 # Installing Tinode
 
+The config file [`tinode.conf`](./server/tinode.conf) contains extensive instructions on configuring the server.
+
 ## Installing from Binaries
 
 1. Visit the [Releases page](https://github.com/tinode/chat/releases/), choose the latest or otherwise the most suitable release. From the list of binaries download the one for your database and platform. Once the binary is downloaded, unpack it to a directory of your choosing, `cd` to that directory.
@@ -26,9 +28,9 @@ See [instructions](./docker/README.md)
 
 ## Building from Source
 
-1. Install [Go environment](https://golang.org/doc/install). Make sure Go version is at least 1.9. Building with Go 1.8 or below **will fail**!
+1. Install [Go environment](https://golang.org/doc/install). Make sure Go version is at least 1.14. Building with Go 1.13 or below **will fail**!
 
-2. Make sure either [RethinkDB](https://www.rethinkdb.com/docs/install/) or MySQL (or MariaDB or Percona) is installed and running. MySQL 5.7 or above is required. MySQL 5.6 or below **will not work**. MongoDB (v4.2 and above) also available but it is experimental on not tested in production.
+2. Make sure either [RethinkDB](https://www.rethinkdb.com/docs/install/) or MySQL (or MariaDB or Percona) is installed and running. MySQL 5.7 or above is required. MySQL 5.6 or below **will not work**. MongoDB (v4.2 and above) is also available and stable but not tested in production.
 
 3. Fetch, build Tinode server and tinode-db database initializer:
  - **RethinkDb**:
@@ -71,7 +73,7 @@ See [instructions](./docker/README.md)
 
 5. Make sure you specify the adapter name in your `tinode.conf`. E.g. you want to run Tinode with MySQL:
 ```js
-	"store_config: {
+	"store_config": {
 		...
 		"use_adapter": "mysql",
 		...
@@ -80,23 +82,24 @@ See [instructions](./docker/README.md)
 
 6. Now that you have built the binaries, follow instructions in the _Running a Standalone Server_ section.
 
+
 ## Running a Standalone Server
 
 1. Make sure your database is running:
  - **RethinkDB**: https://www.rethinkdb.com/docs/start-a-server/
-	```
-	rethinkdb --bind all --daemon
-	```
+ ```
+ rethinkdb --bind all --daemon
+ ```
  - **MySQL**: https://dev.mysql.com/doc/mysql-startstop-excerpt/5.7/en/programs-server.html
-	```
-	mysql.server start
-	```
+ ```
+ mysql.server start
+ ```
  - **MongoDB**: https://docs.mongodb.com/manual/administration/install-community/
 
-    MongoDB should run as single node replicaset. See https://docs.mongodb.com/manual/administration/replica-set-deployment/
-	```
-	mongod
-	```
+  MongoDB should run as single node replicaset. See https://docs.mongodb.com/manual/administration/replica-set-deployment/
+  ```
+  mongod
+  ```
 
 2. Run DB initializer
 	```
@@ -111,19 +114,24 @@ See [instructions](./docker/README.md)
 
 3. Unpack JS client to a directory, for instance `$HOME/tinode/webapp/` by unzipping `https://github.com/tinode/webapp/archive/master.zip` and `https://github.com/tinode/tinode-js/archive/master.zip` to the same directory.
 
-4. Run the server
+4. Copy or symlink template directory `$GOPATH/src/github.com/tinode/chat/server/templ` to `$GOPATH/bin/templ`
+	```
+	ln -s $GOPATH/src/github.com/tinode/chat/server/templ $GOPATH/bin
+	```
+
+5. Run the server
 	```
 	$GOPATH/bin/tinode -config=$GOPATH/src/github.com/tinode/chat/server/tinode.conf -static_data=$HOME/tinode/webapp/
 	```
 
-5. Test your installation by pointing your browser to [http://localhost:6060/](http://localhost:6060/). The static files from the `-static_data` path are served at web root `/`. You can change this by editing the line `static_mount` in the config file.
+6. Test your installation by pointing your browser to [http://localhost:6060/](http://localhost:6060/). The static files from the `-static_data` path are served at web root `/`. You can change this by editing the line `static_mount` in the config file.
 
 **Important!** If you are running Tinode alongside another webserver, such as Apache or nginx, keep in mind that you need to launch the webapp from the URL served by Tinode. Otherwise it won't work.
 
 
 ## Running a Cluster
 
-- Install and run the database, run DB initializer, unpack JS files as described in the previous section. Both MySQL and RethinkDB supports [cluster](https://www.mysql.com/products/cluster/) [mode](https://www.rethinkdb.com/docs/start-a-server/#a-rethinkdb-cluster-using-multiple-machines). You may consider it for added resiliency.
+- Install and run the database, run DB initializer, unpack JS files, and link or copy template directory as described in the previous section. Both MySQL and RethinkDB supports [cluster](https://www.mysql.com/products/cluster/) [mode](https://www.rethinkdb.com/docs/start-a-server/#a-rethinkdb-cluster-using-multiple-machines). You may consider it for added resiliency.
 
 - Cluster expects at least two nodes. A minimum of three nodes is recommended.
 

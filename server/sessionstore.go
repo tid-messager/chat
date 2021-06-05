@@ -10,13 +10,13 @@ package main
 
 import (
 	"container/list"
-	"log"
 	"net/http"
 	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/tinode/chat/pbx"
+	"github.com/tinode/chat/server/logs"
 	"github.com/tinode/chat/server/store"
 	"github.com/tinode/chat/server/store/types"
 )
@@ -40,14 +40,14 @@ func (ss *SessionStore) NewSession(conn interface{}, sid string) (*Session, int)
 	var s Session
 
 	if sid == "" {
-		s.sid = store.GetUidString()
+		s.sid = store.Store.GetUidString()
 	} else {
 		s.sid = sid
 	}
 
 	ss.lock.Lock()
 	if _, found := ss.sessCache[s.sid]; found {
-		log.Fatalln("ERROR! duplicate session ID", s.sid)
+		logs.Err.Fatalln("ERROR! duplicate session ID", s.sid)
 	}
 	ss.lock.Unlock()
 
@@ -59,26 +59,24 @@ func (ss *SessionStore) NewSession(conn interface{}, sid string) (*Session, int)
 		s.proto = LPOLL
 		// no need to store c for long polling, it changes with every request
 	case *ClusterNode:
-		s.proto = CLUSTER
+		s.proto = MULTIPLEX
 		s.clnode = c
 	case pbx.Node_MessageLoopServer:
 		s.proto = GRPC
 		s.grpcnode = c
 	default:
-		s.proto = NONE
+		logs.Err.Panicln("session: unknown connection type", conn)
 	}
 
-	if s.proto != NONE {
-		s.subs = make(map[string]*Subscription)
-		s.send = make(chan interface{}, sendQueueLimit+32) // buffered
-		s.stop = make(chan interface{}, 1)                 // Buffered by 1 just to make it non-blocking
-		s.detach = make(chan string, 64)                   // buffered
+	s.subs = make(map[string]*Subscription)
+	s.send = make(chan interface{}, sendQueueLimit+32) // buffered
+	s.stop = make(chan interface{}, 1)                 // Buffered by 1 just to make it non-blocking
+	s.detach = make(chan string, 64)                   // buffered
 
-		if globals.cluster != nil && s.proto != CLUSTER {
-			// This is only useful when running as a cluster and only for non-proxied sessions.
-			s.remoteSubs = make(map[string]*RemoteSubscription)
-		}
-	}
+	s.bkgTimer = time.NewTimer(time.Hour)
+	s.bkgTimer.Stop()
+
+	s.inflightReqs = &sync.WaitGroup{}
 
 	s.lastTouched = time.Now()
 
@@ -106,6 +104,10 @@ func (ss *SessionStore) NewSession(conn interface{}, sid string) (*Session, int)
 		}
 	}
 
+	numSessions := len(ss.sessCache)
+	statsSet("LiveSessions", int64(numSessions))
+	statsInc("TotalSessions", 1)
+
 	ss.lock.Unlock()
 
 	// Deleting long polling sessions.
@@ -115,10 +117,7 @@ func (ss *SessionStore) NewSession(conn interface{}, sid string) (*Session, int)
 		sess.cleanUp(true)
 	}
 
-	statsSet("LiveSessions", int64(len(ss.sessCache)))
-	statsInc("TotalSessions", 1)
-
-	return &s, len(ss.sessCache)
+	return &s, numSessions
 }
 
 // Get fetches a session from store by session ID.
@@ -159,12 +158,15 @@ func (ss *SessionStore) Shutdown() {
 
 	shutdown := NoErrShutdown(types.TimeNow())
 	for _, s := range ss.sessCache {
-		if s.stop != nil && s.proto != CLUSTER {
-			s.stop <- s.serialize(shutdown)
+		if !s.isMultiplex() {
+			_, data := s.serialize(shutdown)
+			s.stopSession(data)
 		}
 	}
 
-	log.Printf("SessionStore shut down, sessions terminated: %d", len(ss.sessCache))
+	// TODO: Consider broadcasting shutdown to other cluster nodes.
+
+	logs.Info.Println("SessionStore shut down, sessions terminated:", len(ss.sessCache))
 }
 
 // EvictUser terminates all sessions of a given user.
@@ -172,10 +174,13 @@ func (ss *SessionStore) EvictUser(uid types.Uid, skipSid string) {
 	ss.lock.Lock()
 	defer ss.lock.Unlock()
 
+	// FIXME: this probably needs to be optimized. This may take very long time if the node hosts 100000 sessions.
 	evicted := NoErrEvicted("", "", types.TimeNow())
+	evicted.AsUser = uid.UserId()
 	for _, s := range ss.sessCache {
-		if s.uid == uid && s.stop != nil && s.sid != skipSid {
-			s.stop <- s.serialize(evicted)
+		if s.uid == uid && !s.isMultiplex() && s.sid != skipSid {
+			_, data := s.serialize(evicted)
+			s.stopSession(data)
 			delete(ss.sessCache, s.sid)
 			if s.proto == LPOLL {
 				ss.lru.Remove(s.lpTracker)
@@ -194,11 +199,11 @@ func (ss *SessionStore) NodeRestarted(nodeName string, fingerprint int64) {
 	defer ss.lock.Unlock()
 
 	for _, s := range ss.sessCache {
-		if s.proto != CLUSTER || s.clnode.name != nodeName {
+		if !s.isMultiplex() || s.clnode.name != nodeName {
 			continue
 		}
 		if s.clnode.fingerprint != fingerprint {
-			s.stop <- nil
+			s.stopSession(nil)
 			delete(ss.sessCache, s.sid)
 		}
 	}

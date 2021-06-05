@@ -4,6 +4,7 @@ package basic
 import (
 	"encoding/json"
 	"errors"
+	"regexp"
 	"strings"
 	"time"
 
@@ -16,11 +17,15 @@ import (
 
 // Define default constraints on login and password
 const (
-	defaultMinLoginLength = 1
+	defaultMinLoginLength = 2
 	defaultMaxLoginLength = 32
 
 	defaultMinPasswordLength = 3
 )
+
+// Token suitable as a login: starts with a Unicode letter (class L) and contains Unicode letters (L),
+// numbers (N) and underscore.
+var loginPattern = regexp.MustCompile(`^\pL[_\pL\pN]+$`)
 
 // authenticator is the type to map authentication methods to.
 type authenticator struct {
@@ -32,7 +37,8 @@ type authenticator struct {
 }
 
 func (a *authenticator) checkLoginPolicy(uname string) error {
-	if len([]rune(uname)) < a.minLoginLength || len([]rune(uname)) > defaultMaxLoginLength {
+	rlogin := []rune(uname)
+	if len(rlogin) < a.minLoginLength || len(rlogin) > defaultMaxLoginLength || !loginPattern.MatchString(uname) {
 		return types.ErrPolicy
 	}
 
@@ -100,7 +106,7 @@ func (a *authenticator) Init(jsonconf json.RawMessage, name string) error {
 }
 
 // AddRecord adds a basic authentication record to DB.
-func (a *authenticator) AddRecord(rec *auth.Rec, secret []byte) (*auth.Rec, error) {
+func (a *authenticator) AddRecord(rec *auth.Rec, secret []byte, remoteAddr string) (*auth.Rec, error) {
 	uname, password, err := parseSecret(secret)
 	if err != nil {
 		return nil, err
@@ -120,7 +126,7 @@ func (a *authenticator) AddRecord(rec *auth.Rec, secret []byte) (*auth.Rec, erro
 	}
 	var expires time.Time
 	if rec.Lifetime > 0 {
-		expires = time.Now().Add(rec.Lifetime).UTC().Round(time.Millisecond)
+		expires = time.Now().Add(time.Duration(rec.Lifetime)).UTC().Round(time.Millisecond)
 	}
 
 	authLevel := rec.AuthLevel
@@ -141,7 +147,7 @@ func (a *authenticator) AddRecord(rec *auth.Rec, secret []byte) (*auth.Rec, erro
 }
 
 // UpdateRecord updates password for basic authentication.
-func (a *authenticator) UpdateRecord(rec *auth.Rec, secret []byte) (*auth.Rec, error) {
+func (a *authenticator) UpdateRecord(rec *auth.Rec, secret []byte, remoteAddr string) (*auth.Rec, error) {
 	uname, password, err := parseSecret(secret)
 	if err != nil {
 		return nil, err
@@ -161,6 +167,11 @@ func (a *authenticator) UpdateRecord(rec *auth.Rec, secret []byte) (*auth.Rec, e
 		uname = login
 	} else if err = a.checkLoginPolicy(uname); err != nil {
 		return nil, err
+	} else if uid, _, _, _, err := store.Users.GetAuthUniqueRecord(a.name, uname); err != nil {
+		return nil, err
+	} else if !uid.IsZero() {
+		// The (new) user name already exists. Report an error.
+		return nil, types.ErrDuplicate
 	}
 
 	if err = a.checkPasswordPolicy(password); err != nil {
@@ -173,7 +184,7 @@ func (a *authenticator) UpdateRecord(rec *auth.Rec, secret []byte) (*auth.Rec, e
 	}
 	var expires time.Time
 	if rec.Lifetime > 0 {
-		expires = types.TimeNow().Add(rec.Lifetime)
+		expires = types.TimeNow().Add(time.Duration(rec.Lifetime))
 	}
 	err = store.Users.UpdateAuthRecord(rec.Uid, auth.LevelAuth, a.name, uname, passhash, expires)
 	if err != nil {
@@ -186,6 +197,7 @@ func (a *authenticator) UpdateRecord(rec *auth.Rec, secret []byte) (*auth.Rec, e
 		if tag == oldTag {
 			rec.Tags[i] = rec.Tags[len(rec.Tags)-1]
 			rec.Tags = rec.Tags[:len(rec.Tags)-1]
+
 			break
 		}
 	}
@@ -196,7 +208,7 @@ func (a *authenticator) UpdateRecord(rec *auth.Rec, secret []byte) (*auth.Rec, e
 }
 
 // Authenticate checks login and password.
-func (a *authenticator) Authenticate(secret []byte) (*auth.Rec, []byte, error) {
+func (a *authenticator) Authenticate(secret []byte, remoteAddr string) (*auth.Rec, []byte, error) {
 	uname, password, err := parseSecret(secret)
 	if err != nil {
 		return nil, nil, err
@@ -228,13 +240,26 @@ func (a *authenticator) Authenticate(secret []byte) (*auth.Rec, []byte, error) {
 	return &auth.Rec{
 		Uid:       uid,
 		AuthLevel: authLvl,
-		Lifetime:  lifetime,
+		Lifetime:  auth.Duration(lifetime),
 		Features:  0,
 		State:     types.StateUndefined}, nil, nil
 }
 
+// AsTag convert search token into a prefixed tag, if possible.
+func (a *authenticator) AsTag(token string) string {
+	if !a.addToTags {
+		return ""
+	}
+
+	if err := a.checkLoginPolicy(token); err != nil {
+		return ""
+	}
+
+	return a.name + ":" + token
+}
+
 // IsUnique checks login uniqueness.
-func (a *authenticator) IsUnique(secret []byte) (bool, error) {
+func (a *authenticator) IsUnique(secret []byte, remoteAddr string) (bool, error) {
 	uname, _, err := parseSecret(secret)
 	if err != nil {
 		return false, err
@@ -265,13 +290,13 @@ func (a *authenticator) DelRecords(uid types.Uid) error {
 	return store.Users.DelAuthRecords(uid, a.name)
 }
 
-// RestrictedTags returns tag namespaces restricted in this config.
+// RestrictedTags returns tag namespaces (prefixes) restricted by this adapter.
 func (a *authenticator) RestrictedTags() ([]string, error) {
-	var tags []string
+	var prefix []string
 	if a.addToTags {
-		tags = []string{a.name}
+		prefix = []string{a.name}
 	}
-	return tags, nil
+	return prefix, nil
 }
 
 // GetResetParams returns authenticator parameters passed to password reset handler.

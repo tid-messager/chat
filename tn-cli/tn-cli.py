@@ -1,4 +1,5 @@
 #!/usr/bin/env python
+# coding=utf-8
 
 """Python implementation of Tinode command line client using gRPC."""
 
@@ -27,8 +28,6 @@ import sys
 import threading
 import time
 
-from google.protobuf import json_format
-
 # Import generated grpc modules
 from tinode_grpc import pb
 from tinode_grpc import pbx
@@ -37,9 +36,10 @@ import tn_globals
 from tn_globals import printerr
 from tn_globals import printout
 from tn_globals import stdoutln
+from tn_globals import to_json
 
 APP_NAME = "tn-cli"
-APP_VERSION = "1.4.0"
+APP_VERSION = "1.5.8"
 PROTOCOL_VERSION = "0"
 LIB_VERSION = pkg_resources.get_distribution("tinode_grpc").version
 GRPC_VERSION = pkg_resources.get_distribution("grpcio").version
@@ -61,6 +61,13 @@ AWAIT_TIMEOUT = 5
 # This is needed for gRPC SSL to work correctly.
 os.environ["GRPC_SSL_CIPHER_SUITES"] = "HIGH+ECDSA"
 
+# Setup crash handler: close input reader otherwise a crash
+# makes terminal session unusable.
+def exception_hook(type, value, traceBack):
+    if tn_globals.InputThread != None:
+        tn_globals.InputThread.join(0.3)
+sys.excepthook = exception_hook
+
 # Enable the following variables for debugging.
 # os.environ["GRPC_TRACE"] = "all"
 # os.environ["GRPC_VERBOSITY"] = "INFO"
@@ -79,8 +86,8 @@ class dotdict(dict):
     __delattr__ = dict.__delitem__
 
 
-# Pack user's name and avatar into a vcard.
-def make_vcard(fn, photofile):
+# Pack user's name and avatar into a theCard.
+def makeTheCard(fn, photofile):
     card = None
 
     if (fn != None and fn.strip() != "") or photofile != None:
@@ -220,6 +227,8 @@ def getVar(path):
             var = getattr(var, p)
             if x or x == 0:
                 var = var[x]
+    if isinstance(var, bytes):
+      var = var.decode('utf-8')
     return var
 
 # Dereference values, i.e. cmd.val == $usr => cmd.val == <actual value of usr>
@@ -286,15 +295,15 @@ def stdin(InputQueue):
     except Exception as ex:
         printerr("Exception in stdin", ex)
 
-    InputQueue.append("exit")
+    InputQueue.append('exit')
 
 # Constructing individual messages
 # {hi}
-def hiMsg(id):
+def hiMsg(id, background):
     tn_globals.OnCompletion[str(id)] = lambda params: print_server_params(params)
     return pb.ClientMsg(hi=pb.ClientHi(id=str(id), user_agent=APP_NAME + "/" + APP_VERSION + " (" +
         platform.system() + "/" + platform.release() + "); gRPC-python/" + LIB_VERSION + "+" + GRPC_VERSION,
-        ver=LIB_VERSION, lang="EN"))
+        ver=LIB_VERSION, lang="EN", background=background))
 
 # {acc}
 def accMsg(id, cmd, ignored):
@@ -317,7 +326,7 @@ def accMsg(id, cmd, ignored):
     elif cmd.suspend == 'false':
         state = 'ok'
 
-    cmd.public = encode_to_bytes(make_vcard(cmd.fn, cmd.photo))
+    cmd.public = encode_to_bytes(makeTheCard(cmd.fn, cmd.photo))
     cmd.private = encode_to_bytes(cmd.private)
     return pb.ClientMsg(acc=pb.ClientAcc(id=str(id), user_id=cmd.user, state=state,
         scheme=cmd.scheme, secret=cmd.secret, login=cmd.do_login, tags=cmd.tags.split(",") if cmd.tags else None,
@@ -357,14 +366,15 @@ def subMsg(id, cmd, ignored):
         cmd.topic = tn_globals.DefaultTopic
     if cmd.get_query:
         cmd.get_query = pb.GetQuery(what=" ".join(cmd.get_query.split(",")))
-    cmd.public = encode_to_bytes(make_vcard(cmd.fn, cmd.photo))
+    cmd.public = encode_to_bytes(makeTheCard(cmd.fn, cmd.photo))
     cmd.private = encode_to_bytes(cmd.private)
     return pb.ClientMsg(sub=pb.ClientSub(id=str(id), topic=cmd.topic,
         set_query=pb.SetQuery(
             desc=pb.SetDesc(public=cmd.public, private=cmd.private,
                 default_acs=pb.DefaultAcsMode(auth=cmd.auth, anon=cmd.anon)),
             sub=pb.SetSub(mode=cmd.mode),
-            tags=cmd.tags.split(",") if cmd.tags else None), get_query=cmd.get_query), on_behalf_of=tn_globals.DefaultUser)
+            tags=cmd.tags.split(",") if cmd.tags else None),
+        get_query=cmd.get_query), on_behalf_of=tn_globals.DefaultUser)
 
 # {leave}
 def leaveMsg(id, cmd, ignored):
@@ -423,7 +433,7 @@ def setMsg(id, cmd, ignored):
         cmd.topic = tn_globals.DefaultTopic
 
     if cmd.public == None:
-        cmd.public = encode_to_bytes(make_vcard(cmd.fn, cmd.photo))
+        cmd.public = encode_to_bytes(makeTheCard(cmd.fn, cmd.photo))
     else:
         cmd.public = encode_to_bytes(cmd.public)
     cmd.private = encode_to_bytes(cmd.private)
@@ -433,7 +443,6 @@ def setMsg(id, cmd, ignored):
             stdoutln('Warning: multiple credentials specified. Will use only the first one.')
         cred = cred[0]
 
-    print('seting cred', cred)
     return pb.ClientMsg(set=pb.ClientSet(id=str(id), topic=cmd.topic,
         query=pb.SetQuery(
             desc=pb.SetDesc(default_acs=pb.DefaultAcsMode(auth=cmd.auth, anon=cmd.anon),
@@ -448,47 +457,77 @@ def delMsg(id, cmd, ignored):
         stdoutln("Must specify what to delete")
         return None
 
-    cmd.topic = cmd.topic if cmd.topic else tn_globals.DefaultTopic
-    cmd.user = cmd.user if cmd.user else tn_globals.DefaultUser
     enum_what = None
     before = None
     seq_list = None
     cred = None
     if cmd.what == 'msg':
+        enum_what = pb.ClientDel.MSG
+        cmd.topic = cmd.topic if cmd.topic else tn_globals.DefaultTopic
         if not cmd.topic:
             stdoutln("Must specify topic to delete messages")
             return None
-        enum_what = pb.ClientDel.MSG
-        cmd.user = None
-        if cmd.msglist == 'all':
-            seq_list = [pb.DelQuery(range=pb.SeqRange(low=1, hi=0x8FFFFFF))]
-        elif cmd.msglist != None:
-            seq_list = [pb.DelQuery(seq_id=int(x.strip())) for x in cmd.msglist.split(',')]
+        if cmd.user:
+            stdoutln("Unexpected '--user' parameter")
+            return None
+        if not cmd.seq:
+            stdoutln("Must specify message IDs to delete")
+            return None
+
+        if cmd.seq == 'all':
+            seq_list = [pb.SeqRange(low=1, hi=0x8FFFFFF)]
+        else:
+            # Split a list like '1,2,3,10-22' into ranges.
+            try:
+                seq_list = []
+                for item in cmd.seq.split(','):
+                    if '-' in item:
+                        low, hi = [int(x.strip()) for x in item.split('-')]
+                        if low>=hi or low<=0:
+                            stdoutln("Invalid message ID range {0}-{1}".format(low, hi))
+                            return None
+                        seq_list.append(pb.SeqRange(low=low, hi=hi))
+                    else:
+                        seq_list.append(pb.SeqRange(low=int(item.strip())))
+            except ValueError as err:
+                stdoutln("Invalid message IDs: {0}".format(err))
+                return None
 
     elif cmd.what == 'sub':
+        cmd.topic = cmd.topic if cmd.topic else tn_globals.DefaultTopic
+        cmd.user = cmd.user if cmd.user else tn_globals.DefaultUser
         if not cmd.user or not cmd.topic:
             stdoutln("Must specify topic and user to delete subscription")
             return None
         enum_what = pb.ClientDel.SUB
 
     elif cmd.what == 'topic':
+        cmd.topic = cmd.topic if cmd.topic else tn_globals.DefaultTopic
+        if cmd.user:
+            stdoutln("Unexpected '--user' parameter")
+            return None
         if not cmd.topic:
             stdoutln("Must specify topic to delete")
             return None
         enum_what = pb.ClientDel.TOPIC
-        cmd.user = None
 
     elif cmd.what == 'user':
+        cmd.user = cmd.user if cmd.user else tn_globals.DefaultUser
+        if cmd.topic:
+            stdoutln("Unexpected '--topic' parameter")
+            return None
         enum_what = pb.ClientDel.USER
-        cmd.topic = None
 
     elif cmd.what == 'cred':
+        if cmd.user:
+            stdoutln("Unexpected '--user' parameter")
+            return None
         if cmd.topic != 'me':
             stdoutln("Topic must be 'me'")
             return None
         cred = parse_cred(cmd.cred)
         if cred is None:
-            stdoutln("Topic must be 'me'")
+            stdoutln("Failed to parse credential '{0}'".format(cmd.cred))
             return None
         cred = cred[0]
         enum_what = pb.ClientDel.CRED
@@ -582,7 +621,7 @@ def parse_cmd(parts):
         parser.add_argument('what', default=None, help='what to delete')
         parser.add_argument('--topic', default=None, help='topic being affected')
         parser.add_argument('--user', default=None, help='either delete this user or a subscription with this user')
-        parser.add_argument('--seq', default=None, help='"all" or comma separated list of message IDs to delete')
+        parser.add_argument('--seq', default=None, help='"all" or a list of comma- and dash-separated message IDs to delete, e.g. "1,2,9-12"')
         parser.add_argument('--hard', action='store_true', help='request to hard-delete')
         parser.add_argument('--cred', help='credential to delete in method:value format, e.g. email:test@example.com, tel:12345')
     elif parts[0] == "login":
@@ -699,36 +738,40 @@ def parse_input(cmd):
         parser = argparse.ArgumentParser(prog=parts[0], description='Pause execution')
         parser.add_argument('millis', type=int, help='milliseconds to wait')
 
+    elif parts[0] == ".verbose":
+        parser = argparse.ArgumentParser(prog=parts[0], description='Toggle logging verbosity')
+
     else:
         parser = parse_cmd(parts)
 
     if not parser:
         printout("Unrecognized:", parts[0])
         printout("Possible commands:")
-        printout("\t.await\t- wait for completion of an operation")
-        printout("\t.exit\t- exit the program (also .quit)")
-        printout("\t.log\t- write value of a variable to stdout")
-        printout("\t.must\t- wait for completion of an operation, terminate on failure")
-        printout("\t.sleep\t- pause execution")
-        printout("\t.use\t- set default user (on_behalf_of) or topic")
-        printout("\tacc\t- create or alter an account")
-        printout("\tdel\t- delete message(s), topic, subscription, or user")
-        printout("\tget\t- query topic for metadata or messages")
-        printout("\tleave\t- detach or unsubscribe from topic")
-        printout("\tlogin\t- authenticate current session")
-        printout("\tnote\t- send a notification")
-        printout("\tpub\t- post message to topic")
-        printout("\tset\t- update topic metadata")
-        printout("\tsub\t- subscribe to topic")
-        printout("\tupload\t- upload file out of band")
-        printout("\tusermod\t- modify user account")
+        printout("\t.await\t\t- wait for completion of an operation")
+        printout("\t.exit\t\t- exit the program (also .quit)")
+        printout("\t.log\t\t- write value of a variable to stdout")
+        printout("\t.must\t\t- wait for completion of an operation, terminate on failure")
+        printout("\t.sleep\t\t- pause execution")
+        printout("\t.use\t\t- set default user (on_behalf_of) or topic")
+        printout("\t.verbose\t- toggle logging verbosity on/off")
+        printout("\tacc\t\t- create or alter an account")
+        printout("\tdel\t\t- delete message(s), topic, subscription, or user")
+        printout("\tget\t\t- query topic for metadata or messages")
+        printout("\tleave\t\t- detach or unsubscribe from topic")
+        printout("\tlogin\t\t- authenticate current session")
+        printout("\tnote\t\t- send a notification")
+        printout("\tpub\t\t- post message to topic")
+        printout("\tset\t\t- update topic metadata")
+        printout("\tsub\t\t- subscribe to topic")
+        printout("\tupload\t\t- upload file out of band")
+        printout("\tusermod\t\t- modify user account")
         printout("\n\tType <command> -h for help")
 
         if macros:
             printout("\nMacro commands:")
             for key in sorted(macros.Macros):
                 macro = macros.Macros[key]
-                printout("\t%s\t- %s" % (macro.name(), macro.description()))
+                printout("\t%s\t\t- %s" % (macro.name(), macro.description()))
         return None
 
     try:
@@ -772,21 +815,34 @@ def serialize_cmd(string, id, args):
         elif cmd.cmd == ".use":
             if cmd.user != "unchanged":
                 if cmd.user:
-                    tn_globals.DefaultUser = cmd.user
+                    if len(cmd.user) > 3 and cmd.user.startswith("usr"):
+                        tn_globals.DefaultUser = cmd.user
+                    else:
+                        stdoutln("Error: user ID '{}' is invalid".format(cmd.user))
                 else:
                     tn_globals.DefaultUser = None
-                stdoutln("Default user='" + cmd.user + "'")
+                stdoutln("Default user='{}'".format(tn_globals.DefaultUser))
+
             if cmd.topic != "unchanged":
                 if cmd.topic:
-                    tn_globals.DefaultTopic = cmd.topic
+                    if cmd.topic[:3] in ['me', 'fnd', 'sys', 'usr', 'grp', 'chn']:
+                        tn_globals.DefaultTopic = cmd.topic
+                    else:
+                        stdoutln("Error: topic '{}' is invalid".format(cmd.topic))
                 else:
                     tn_globals.DefaultTopic = None
-                stdoutln("Default topic='" + cmd.topic + "'")
+                stdoutln("Default topic='{}'".format(tn_globals.DefaultTopic))
+
             return None, None
 
         elif cmd.cmd == ".sleep":
-            stdoutln("Pausing for " + str(cmd.millis) + "ms...")
+            stdoutln("Pausing for {}ms...".format(cmd.millis))
             time.sleep(cmd.millis/1000.)
+            return None, None
+
+        elif cmd.cmd == ".verbose":
+            tn_globals.Verbose = not tn_globals.Verbose
+            stdoutln("Logging is {}".format("verbose" if tn_globals.Verbose else "normal"))
             return None, None
 
         elif cmd.cmd == "upload":
@@ -802,12 +858,19 @@ def serialize_cmd(string, id, args):
             return True, macros.Macros[cmd.cmd].run(id, derefVals(cmd), args)
 
         else:
-            stdoutln("Error: unrecognized: '{0}'".format(cmd.cmd))
+            stdoutln("Error: unrecognized: '{}'".format(cmd.cmd))
             return None, None
 
     except Exception as err:
         stdoutln("Error in '{0}': {1}".format(cmd.cmd, err))
         return None, None
+
+def pop_from_output_queue():
+    if tn_globals.OutputQueue.empty():
+        return False
+    sys.stdout.write("\r<= "+tn_globals.OutputQueue.get())
+    sys.stdout.flush()
+    return True
 
 # Generator of protobuf messages.
 def gen_message(scheme, secret, args):
@@ -821,7 +884,10 @@ def gen_message(scheme, secret, args):
     tn_globals.InputThread.daemon = True
     tn_globals.InputThread.start()
 
-    yield hiMsg(id)
+    msg = hiMsg(id, args.background)
+    if tn_globals.Verbose:
+        stdoutln("\r=> " + to_json(msg))
+    yield msg
 
     if scheme != None:
         id += 1
@@ -829,7 +895,10 @@ def gen_message(scheme, secret, args):
         setattr(login, 'scheme', scheme)
         setattr(login, 'secret', secret)
         setattr(login, 'cred', None)
-        yield loginMsg(id, login, args)
+        msg = loginMsg(id, login, args)
+        if tn_globals.Verbose:
+            stdoutln("\r=> " + to_json(msg))
+        yield msg
 
     print_prompt = True
 
@@ -840,6 +909,9 @@ def gen_message(scheme, secret, args):
                 inp = tn_globals.InputQueue.popleft()
 
                 if inp == 'exit' or inp == 'quit' or inp == '.exit' or inp == '.quit':
+                    # Drain the output queue.
+                    while pop_from_output_queue():
+                        pass
                     return
 
                 pbMsg, cmd = serialize_cmd(inp, id, args)
@@ -859,11 +931,12 @@ def gen_message(scheme, secret, args):
                         tn_globals.WaitingFor = cmd
 
                     if not hasattr(cmd, 'no_yield'):
+                        if tn_globals.Verbose:
+                            stdoutln("\r=> " + to_json(pbMsg))
                         yield pbMsg
 
             elif not tn_globals.OutputQueue.empty():
-                sys.stdout.write("\r<= "+tn_globals.OutputQueue.get())
-                sys.stdout.flush()
+                pop_from_output_queue()
                 print_prompt = tn_globals.IsInteractive
 
             else:
@@ -876,7 +949,10 @@ def gen_message(scheme, secret, args):
                         stdoutln("Timeout while waiting for '{0}' response".format(tn_globals.WaitingFor.cmd))
                         tn_globals.WaitingFor = None
 
-                time.sleep(0.1)
+                if tn_globals.IsInteractive:
+                    time.sleep(0.1)
+                else:
+                    time.sleep(0.01)
 
         except Exception as err:
             stdoutln("Exception in generator: {0}".format(err))
@@ -904,6 +980,7 @@ def handle_ctrl(ctrl):
 
 # The main processing loop: send messages to server, receive responses.
 def run(args, schema, secret):
+    failed = False
     try:
         if tn_globals.IsInteractive:
             tn_globals.Prompt = PromptSession()
@@ -920,6 +997,9 @@ def run(args, schema, secret):
 
         # Read server responses
         for msg in stream:
+            if tn_globals.Verbose:
+                stdoutln("\r<= " + to_json(msg))
+
             if msg.HasField("ctrl"):
                 handle_ctrl(msg.ctrl)
 
@@ -951,17 +1031,17 @@ def run(args, schema, secret):
                 stdoutln(json.loads(msg.data.content))
 
             elif msg.HasField("pres"):
-                pass
+                # 'ON', 'OFF', 'UA', 'UPD', 'GONE', 'ACS', 'TERM', 'MSG', 'READ', 'RECV', 'DEL', 'TAGS'
+                what = pb.ServerPres.What.Name(msg.pres.what)
+                stdoutln("\r<= pres " + what + " " + msg.pres.topic)
 
             elif msg.HasField("info"):
-                what = "unknown"
-                if msg.info.what == pb.READ:
-                    what = "read"
-                elif msg.info.what == pb.RECV:
-                    what = "recv"
-                elif msg.info.what == pb.KP:
-                    what = "kp"
-                stdoutln("\rMessage #" + str(msg.info.seq_id) + " " + what +
+                switcher = {
+                    pb.READ: 'READ',
+                    pb.RECV: 'RECV',
+                    pb.KP: 'KP'
+                }
+                stdoutln("\rMessage #" + str(msg.info.seq_id) + " " + switcher.get(msg.info.what, "unknown") +
                     " by " + msg.info.from_user_id + "; topic=" + msg.info.topic + " (" + msg.topic + ")")
 
             else:
@@ -970,14 +1050,17 @@ def run(args, schema, secret):
     except grpc.RpcError as err:
         # print(err)
         printerr("gRPC failed with {0}: {1}".format(err.code(), err.details()))
+        failed = True
     except Exception as ex:
         printerr("Request failed: {0}".format(ex))
-        # print(traceback.format_exc())
+        failed = True
     finally:
         printout('Shutting down...')
         channel.close()
         if tn_globals.InputThread != None:
             tn_globals.InputThread.join(0.3)
+
+    return 1 if failed else 0
 
 # Read cookie file for logging in with the cookie.
 def read_cookie():
@@ -988,7 +1071,7 @@ def read_cookie():
         return params.get("token")
 
     except Exception as err:
-        println("Missing or invalid cookie file '.tn-cli-cookie'", err)
+        printerr("Missing or invalid cookie file '.tn-cli-cookie'", err)
         return None
 
 # Lambda for handling login
@@ -1028,7 +1111,7 @@ def print_server_params(params):
 
 if __name__ == '__main__':
     """Parse command-line arguments. Extract host name and authentication scheme, if one is provided"""
-    version = APP_VERSION + "/" + LIB_VERSION + "; gRPC/" + GRPC_VERSION
+    version = APP_VERSION + "/" + LIB_VERSION + "; gRPC/" + GRPC_VERSION + "; Python " + platform.python_version()
     purpose = "Tinode command line client. Version " + version + "."
 
     parser = argparse.ArgumentParser(description=purpose)
@@ -1044,11 +1127,17 @@ if __name__ == '__main__':
     parser.add_argument('--api-key', default='AQEAAAABAAD_rAp4DJh05a1HAwFT3A6K', help='API key for file uploads')
     parser.add_argument('--load-macros', default='./macros.py', help='path to macro module to load')
     parser.add_argument('--version', action='store_true', help='print version')
+    parser.add_argument('--verbose', action='store_true', help='log full JSON representation of all messages')
+    parser.add_argument('--background', action='store_const', const=True, help='start interactive sessionin background (non-intractive is always in background)')
+
     args = parser.parse_args()
 
     if args.version:
         printout(version)
         exit()
+
+    if args.verbose:
+        tn_globals.Verbose = True
 
     printout(purpose)
     printout("Secure server" if args.ssl else "Server", "at '"+args.host+"'",
@@ -1072,12 +1161,11 @@ if __name__ == '__main__':
 
         elif tn_globals.IsInteractive:
             """Interactive mode only: try reading the cookie file"""
-            try:
-                schema = 'token'
-                secret = read_cookie()
-                printout("Logging in with cookie file")
-            except Exception as err:
-                printerr("Failed to read authentication cookie", err)
+            printout("Logging in with cookie file")
+            schema = 'token'
+            secret = read_cookie()
+            if not secret:
+                schema = None
 
     # Attempt to load the macro file if available.
     macros = None
@@ -1085,4 +1173,9 @@ if __name__ == '__main__':
         import importlib
         macros = importlib.import_module('macros', args.load_macros) if args.load_macros else None
 
-    run(args, schema, secret)
+    # Check if background session is specified explicitly. If not set it to
+    # True for non-interactive sessions.
+    if args.background is None and not tn_globals.IsInteractive:
+        args.background = True
+
+    sys.exit(run(args, schema, secret))

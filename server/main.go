@@ -1,4 +1,4 @@
-/******************************************************************************
+﻿/******************************************************************************
  *
  *  Description :
  *
@@ -13,10 +13,8 @@ package main
 import (
 	"encoding/json"
 	"flag"
-	"log"
 	"net/http"
 	"os"
-	"path/filepath"
 	"runtime"
 	"runtime/pprof"
 	"strings"
@@ -35,10 +33,11 @@ import (
 	_ "github.com/tinode/chat/server/auth/token"
 
 	// Database backends
-
 	_ "github.com/tinode/chat/server/db/mongodb"
 	_ "github.com/tinode/chat/server/db/mysql"
 	_ "github.com/tinode/chat/server/db/rethinkdb"
+
+	"github.com/tinode/chat/server/logs"
 
 	// Push notifications
 	"github.com/tinode/chat/server/push"
@@ -61,14 +60,16 @@ import (
 
 const (
 	// currentVersion is the current API/protocol version
-	currentVersion = "0.16"
+	currentVersion = "0.17"
 	// minSupportedVersion is the minimum supported API version
-	minSupportedVersion = "0.15"
+	minSupportedVersion = "0.16"
 
 	// idleSessionTimeout defines duration of being idle before terminating a session.
 	idleSessionTimeout = time.Second * 55
-	// idleTopicTimeout defines now long to keep topic alive after the last session detached.
-	idleTopicTimeout = time.Second * 5
+	// idleMasterTopicTimeout defines now long to keep master topic alive after the last session detached.
+	idleMasterTopicTimeout = time.Second * 4
+	// Same as above but shut down the proxy topic sooner. Otherwise master topic would be kept alive for too long.
+	idleProxyTopicTimeout = time.Second * 2
 
 	// defaultMaxMessageSize is the default maximum message size
 	defaultMaxMessageSize = 1 << 19 // 512K
@@ -99,6 +100,10 @@ const (
 
 	// Local path to static content
 	defaultStaticPath = "static"
+
+	// Default country code to fall back to if the "default_country_code" field
+	// isn't specified in the config.
+	defaultCountryCode = "US"
 )
 
 // Build version number defined by the compiler:
@@ -163,6 +168,12 @@ var globals struct {
 
 	// Maximum allowed upload size.
 	maxFileUploadSize int64
+
+	// Prioritize X-Forwarded-For header as the source of IP address of the client.
+	useXForwardedFor bool
+
+	// Country code to assign to sessions by default.
+	defaultCountryCode string
 }
 
 type validatorConfig struct {
@@ -223,6 +234,13 @@ type configType struct {
 	MaxTagCount int `json:"max_tag_count"`
 	// URL path for exposing runtime stats. Disabled if the path is blank.
 	ExpvarPath string `json:"expvar"`
+	// Take IP address of the client from HTTP header 'X-Forwarded-For'.
+	// Useful when tinode is behind a proxy. If missing, fallback to default RemoteAddr.
+	UseXForwardedFor bool `json:"use_x_forwarded_for"`
+	// 2-letter country code (ISO 3166-1 alpha-2) to assign to sessions by default
+	// when the country isn't specified by the client explicitly and
+	// it's impossible to infer it.
+	DefaultCountryCode string `json:"default_country_code"`
 
 	// Configs for subsystems
 	Cluster   json.RawMessage             `json:"cluster_config"`
@@ -238,47 +256,52 @@ type configType struct {
 func main() {
 	executable, _ := os.Executable()
 
-	// All relative paths are resolved against the executable path, not against current working directory.
-	// Absolute paths are left unchanged.
-	rootpath, _ := filepath.Split(executable)
+	logFlags := flag.String("log_flags", "stdFlags",
+		"Comma-separated list of log flags (as defined in https://golang.org/pkg/log/#pkg-constants without the L prefix)")
+	configfile := flag.String("config", "tinode.conf", "Path to config file.")
+	// Path to static content.
+	staticPath := flag.String("static_data", defaultStaticPath, "File path to directory with static files to be served.")
+	listenOn := flag.String("listen", "", "Override address and port to listen on for HTTP(S) clients.")
+	apiPath := flag.String("api_path", "", "Override the base URL path where API is served.")
+	listenGrpc := flag.String("grpc_listen", "", "Override address and port to listen on for gRPC clients.")
+	tlsEnabled := flag.Bool("tls_enabled", false, "Override config value for enabling TLS.")
+	clusterSelf := flag.String("cluster_self", "", "Override the name of the current cluster node.")
+	expvarPath := flag.String("expvar", "", "Override the URL path where runtime stats are exposed. Use '-' to disable.")
+	pprofFile := flag.String("pprof", "", "File name to save profiling info to. Disabled if not set.")
+	pprofUrl := flag.String("pprof_url", "", "Debugging only! URL path for exposing profiling info. Disabled if not set.")
+	flag.Parse()
 
-	log.Printf("Server v%s:%s:%s; pid %d; %d process(es)",
+	logs.Init(os.Stderr, *logFlags)
+
+	curwd, err := os.Getwd()
+	if err != nil {
+		logs.Err.Fatal("Couldn't get current working directory: ", err)
+  }
+
+	logs.Info.Printf("Server v%s:%s:%s; pid %d; %d process(es)",
 		currentVersion, executable, buildstamp,
 		os.Getpid(), runtime.GOMAXPROCS(runtime.NumCPU()))
 
-	var configfile = flag.String("config", "tinode.conf", "Path to config file.")
-	// Path to static content.
-	var staticPath = flag.String("static_data", defaultStaticPath, "File path to directory with static files to be served.")
-	var listenOn = flag.String("listen", "", "Override address and port to listen on for HTTP(S) clients.")
-	var apiPath = flag.String("api_path", "", "Override the base URL path where API is served.")
-	var listenGrpc = flag.String("grpc_listen", "", "Override address and port to listen on for gRPC clients.")
-	var tlsEnabled = flag.Bool("tls_enabled", false, "Override config value for enabling TLS.")
-	var clusterSelf = flag.String("cluster_self", "", "Override the name of the current cluster node.")
-	var expvarPath = flag.String("expvar", "", "Override the URL path where runtime stats are exposed. Use '-' to disable.")
-	var pprofFile = flag.String("pprof", "", "File name to save profiling info to. Disabled if not set.")
-	var pprofUrl = flag.String("pprof_url", "", "Debugging only! URL path for exposing profiling info. Disabled if not set.")
-	flag.Parse()
-
-	*configfile = toAbsolutePath(rootpath, *configfile)
-	log.Printf("Using config from '%s'", *configfile)
+	*configfile = toAbsolutePath(curwd, *configfile)
+	logs.Info.Printf("Using config from '%s'", *configfile)
 
 	var config configType
 	if file, err := os.Open(*configfile); err != nil {
-		log.Fatal("Failed to read config file: ", err)
+		logs.Err.Fatal("Failed to read config file: ", err)
 	} else {
 		jr := jcr.New(file)
 		if err = json.NewDecoder(jr).Decode(&config); err != nil {
 			switch jerr := err.(type) {
 			case *json.UnmarshalTypeError:
 				lnum, cnum, _ := jr.LineAndChar(jerr.Offset)
-				log.Fatalf("Unmarshall error in config file in %s at %d:%d (offset %d bytes): %s",
+				logs.Err.Fatalf("Unmarshall error in config file in %s at %d:%d (offset %d bytes): %s",
 					jerr.Field, lnum, cnum, jerr.Offset, jerr.Error())
 			case *json.SyntaxError:
 				lnum, cnum, _ := jr.LineAndChar(jerr.Offset)
-				log.Fatalf("Syntax error in config file at %d:%d (offset %d bytes): %s",
+				logs.Err.Fatalf("Syntax error in config file at %d:%d (offset %d bytes): %s",
 					lnum, cnum, jerr.Offset, jerr.Error())
 			default:
-				log.Fatal("Failed to parse config file: ", err)
+				logs.Err.Fatal("Failed to parse config file: ", err)
 			}
 		}
 		file.Close()
@@ -298,7 +321,11 @@ func main() {
 	}
 	statsInit(mux, evpath)
 	statsRegisterInt("Version")
-	statsSet("Version", base10Version(parseVersion(currentVersion)))
+	decVersion := base10Version(parseVersion(buildstamp))
+	if decVersion <= 0 {
+		decVersion = base10Version(parseVersion(currentVersion))
+	}
+	statsSet("Version", decVersion)
 
 	// Initialize serving debug profiles (optional).
 	servePprof(mux, *pprofUrl)
@@ -308,17 +335,17 @@ func main() {
 	workerId := clusterInit(config.Cluster, clusterSelf)
 
 	if *pprofFile != "" {
-		*pprofFile = toAbsolutePath(rootpath, *pprofFile)
+		*pprofFile = toAbsolutePath(curwd, *pprofFile)
 
 		cpuf, err := os.Create(*pprofFile + ".cpu")
 		if err != nil {
-			log.Fatal("Failed to create CPU pprof file: ", err)
+			logs.Err.Fatal("Failed to create CPU pprof file: ", err)
 		}
 		defer cpuf.Close()
 
 		memf, err := os.Create(*pprofFile + ".mem")
 		if err != nil {
-			log.Fatal("Failed to create Mem pprof file: ", err)
+			logs.Err.Fatal("Failed to create Mem pprof file: ", err)
 		}
 		defer memf.Close()
 
@@ -326,48 +353,49 @@ func main() {
 		defer pprof.StopCPUProfile()
 		defer pprof.WriteHeapProfile(memf)
 
-		log.Printf("Profiling info saved to '%s.(cpu|mem)'", *pprofFile)
+		logs.Info.Printf("Profiling info saved to '%s.(cpu|mem)'", *pprofFile)
 	}
 
-	// adp := mongodb.GetAdapter()
-	// store.RegisterAdapter(adp)
-
-	err := store.Open(workerId, config.Store)
+	err = store.Store.Open(workerId, config.Store)
 	if err != nil {
-		log.Fatal("Failed to connect to DB: ", err)
+		logs.Err.Fatal("Failed to connect to DB: ", err)
 	}
-	log.Println("DB adapter", store.GetAdapterName())
+	logs.Info.Println("DB adapter", store.Store.GetAdapterName())
 	defer func() {
-		store.Close()
-		log.Println("Closed database connection(s)")
-		log.Println("All done, good bye")
+		store.Store.Close()
+		logs.Info.Println("Closed database connection(s)")
+		logs.Info.Println("All done, good bye")
 	}()
+	statsRegisterDbStats()
 
 	// API key signing secret
 	globals.apiKeySalt = config.APIKeySalt
 
 	err = store.InitAuthLogicalNames(config.Auth["logical_names"])
 	if err != nil {
-		log.Fatal(err)
+		logs.Err.Fatal(err)
 	}
 
 	// List of tag namespaces for user discovery which cannot be changed directly
 	// by the client, e.g. 'email' or 'tel'.
 	globals.immutableTagNS = make(map[string]bool)
 
-	authNames := store.GetAuthNames()
+	authNames := store.Store.GetAuthNames()
 	for _, name := range authNames {
-		if authhdl := store.GetLogicalAuthHandler(name); authhdl == nil {
-			log.Fatalln("Unknown authenticator", name)
+		if authhdl := store.Store.GetLogicalAuthHandler(name); authhdl == nil {
+			logs.Err.Fatalln("Unknown authenticator", name)
 		} else if jsconf := config.Auth[name]; jsconf != nil {
 			if err := authhdl.Init(jsconf, name); err != nil {
-				log.Fatalln("Failed to init auth scheme", name+":", err)
+				logs.Err.Fatalln("Failed to init auth scheme", name+":", err)
 			}
 			tags, err := authhdl.RestrictedTags()
 			if err != nil {
-				log.Fatalln("Failed get restricted tag namespaces", name+":", err)
+				logs.Err.Fatalln("Failed get restricted tag namespaces (prefixes)", name+":", err)
 			}
 			for _, tag := range tags {
+				if strings.Contains(tag, ":") {
+					logs.Err.Fatalln("tags restricted by auth handler should not contain character ':'", tag)
+				}
 				globals.immutableTagNS[tag] = true
 			}
 		}
@@ -379,7 +407,7 @@ func main() {
 		// The namespace can be restricted even if the validator is disabled.
 		if vconf.AddToTags {
 			if strings.Contains(name, ":") {
-				log.Fatal("acc_validation names should not contain character ':'")
+				logs.Err.Fatalln("acc_validation names should not contain character ':'", name)
 			}
 			globals.immutableTagNS[name] = true
 		}
@@ -394,7 +422,7 @@ func main() {
 			lvl := auth.ParseAuthLevel(req)
 			if lvl == auth.LevelNone {
 				if req != "" {
-					log.Fatalf("Invalid required AuthLevel '%s' in validator '%s'", req, name)
+					logs.Err.Fatalf("Invalid required AuthLevel '%s' in validator '%s'", req, name)
 				}
 				// Skip empty string
 				continue
@@ -411,24 +439,25 @@ func main() {
 			continue
 		}
 
-		if val := store.GetValidator(name); val == nil {
-			log.Fatal("Config provided for an unknown validator '" + name + "'")
+		if val := store.Store.GetValidator(name); val == nil {
+			logs.Err.Fatal("Config provided for an unknown validator '" + name + "'")
 		} else if err = val.Init(string(vconf.Config)); err != nil {
-			log.Fatal("Failed to init validator '"+name+"': ", err)
+			logs.Err.Fatal("Failed to init validator '"+name+"': ", err)
 		}
 		if globals.validators == nil {
 			globals.validators = make(map[string]credValidator)
 		}
 		globals.validators[name] = credValidator{
 			requiredAuthLvl: reqLevels,
-			addToTags:       vconf.AddToTags}
+			addToTags:       vconf.AddToTags,
+		}
 	}
 
 	// Partially restricted tag namespaces
 	globals.maskedTagNS = make(map[string]bool, len(config.MaskedTagNamespaces))
 	for _, tag := range config.MaskedTagNamespaces {
 		if strings.Contains(tag, ":") {
-			log.Fatal("masked_tags namespaces should not contain character ':'")
+			logs.Err.Fatal("masked_tags namespaces should not contain character ':'", tag)
 		}
 		globals.maskedTagNS[tag] = true
 	}
@@ -438,14 +467,14 @@ func main() {
 		tags = append(tags, "'"+tag+"'")
 	}
 	if len(tags) > 0 {
-		log.Println("Restricted tags:", tags)
+		logs.Info.Println("Restricted tags:", tags)
 	}
 	tags = nil
 	for tag := range globals.maskedTagNS {
 		tags = append(tags, "'"+tag+"'")
 	}
 	if len(tags) > 0 {
-		log.Println("Masked tags:", tags)
+		logs.Info.Println("Masked tags:", tags)
 	}
 
 	// Maximum message size
@@ -464,6 +493,12 @@ func main() {
 		globals.maxTagCount = defaultMaxTagCount
 	}
 
+	globals.useXForwardedFor = config.UseXForwardedFor
+	globals.defaultCountryCode = config.DefaultCountryCode
+	if globals.defaultCountryCode == "" {
+		globals.defaultCountryCode = defaultCountryCode
+	}
+
 	if config.Media != nil {
 		if config.Media.UseHandler == "" {
 			config.Media = nil
@@ -474,8 +509,8 @@ func main() {
 				if params := config.Media.Handlers[config.Media.UseHandler]; params != nil {
 					conf = string(params)
 				}
-				if err = store.UseMediaHandler(config.Media.UseHandler, conf); err != nil {
-					log.Fatalf("Failed to init media handler '%s': %s", config.Media.UseHandler, err)
+				if err = store.Store.UseMediaHandler(config.Media.UseHandler, conf); err != nil {
+					logs.Err.Fatalf("Failed to init media handler '%s': %s", config.Media.UseHandler, err)
 				}
 			}
 			if config.Media.GcPeriod > 0 && config.Media.GcBlockSize > 0 {
@@ -483,7 +518,7 @@ func main() {
 					config.Media.GcBlockSize)
 				defer func() {
 					stopFilesGc <- true
-					log.Println("Stopped files garbage collector")
+					logs.Info.Println("Stopped files garbage collector")
 				}()
 			}
 		}
@@ -491,11 +526,11 @@ func main() {
 
 	err = push.Init(string(config.Push))
 	if err != nil {
-		log.Fatal("Failed to initialize push notifications:", err)
+		logs.Err.Fatal("Failed to initialize push notifications:", err)
 	}
 	defer func() {
 		push.Stop()
-		log.Println("Stopped push notifications")
+		logs.Info.Println("Stopped push notifications")
 	}()
 
 	// Keep inactive LP sessions for 15 seconds
@@ -510,10 +545,10 @@ func main() {
 
 	tlsConfig, err := parseTLSConfig(*tlsEnabled, config.TLS)
 	if err != nil {
-		log.Fatalln(err)
+		logs.Err.Fatalln(err)
 	}
 
-	// Intialize plugins
+	// Initialize plugins.
 	pluginsInit(config.Plugin)
 
 	// Initialize users cache
@@ -524,7 +559,7 @@ func main() {
 		*listenGrpc = config.GrpcListen
 	}
 	if globals.grpcServer, err = serveGrpc(*listenGrpc, config.GrpcKeepalive, tlsConfig); err != nil {
-		log.Fatal(err)
+		logs.Err.Fatal(err)
 	}
 
 	// Serve static content from the directory in -static_data flag if that's
@@ -534,9 +569,9 @@ func main() {
 	var staticMountPoint string
 	if *staticPath != "" && *staticPath != "-" {
 		// Resolve path to static content.
-		*staticPath = toAbsolutePath(rootpath, *staticPath)
+		*staticPath = toAbsolutePath(curwd, *staticPath)
 		if _, err = os.Stat(*staticPath); os.IsNotExist(err) {
-			log.Fatal("Static content directory is not found", *staticPath)
+			logs.Err.Fatal("Static content directory is not found", *staticPath)
 		}
 
 		staticMountPoint = config.StaticMount
@@ -562,9 +597,9 @@ func main() {
 							// Remove mount point prefix
 							http.StripPrefix(staticMountPoint,
 								http.FileServer(http.Dir(*staticPath))))))))
-		log.Printf("Serving static content from '%s' at '%s'", *staticPath, staticMountPoint)
+		logs.Info.Printf("Serving static content from '%s' at '%s'", *staticPath, staticMountPoint)
 	} else {
-		log.Println("Static content is disabled")
+		logs.Info.Println("Static content is disabled")
 	}
 
 	// Configure root path for serving API calls.
@@ -581,7 +616,7 @@ func main() {
 			config.ApiPath += "/"
 		}
 	}
-	log.Printf("API served from root URL path '%s'", config.ApiPath)
+	logs.Info.Printf("API served from root URL path '%s'", config.ApiPath)
 
 	// Handle websocket clients.
 	mux.HandleFunc(config.ApiPath+"v0/channels", serveWebSocket)
@@ -589,10 +624,10 @@ func main() {
 	mux.Handle(config.ApiPath+"v0/channels/lp", gh.CompressHandler(http.HandlerFunc(serveLongPoll)))
 	if config.Media != nil {
 		// Handle uploads of large files.
-		mux.Handle(config.ApiPath+"v0/file/u/", gh.CompressHandler(http.HandlerFunc(largeFileUpload)))
+		mux.Handle(config.ApiPath+"v0/file/u/", gh.CompressHandler(http.HandlerFunc(largeFileReceive)))
 		// Serve large files.
 		mux.Handle(config.ApiPath+"v0/file/s/", gh.CompressHandler(http.HandlerFunc(largeFileServe)))
-		log.Println("Large media handling enabled", config.Media.UseHandler)
+		logs.Info.Println("Large media handling enabled", config.Media.UseHandler)
 	}
 
 	if staticMountPoint != "/" {
@@ -601,6 +636,6 @@ func main() {
 	}
 
 	if err = listenAndServe(config.Listen, mux, tlsConfig, signalHandler()); err != nil {
-		log.Fatal(err)
+		logs.Err.Fatal(err)
 	}
 }

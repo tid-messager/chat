@@ -8,6 +8,7 @@
 		- [WebSocket](#websocket)
 		- [Long Polling](#long-polling)
 		- [Out of Band Large Files](#out-of-band-large-files)
+		- [Running Behind a Reverse Proxy](#running-behind-a-reverse-proxy)
 	- [Users](#users)
 		- [Authentication](#authentication)
 			- [Creating an Account](#creating-an-account)
@@ -22,6 +23,7 @@
 		- [`fnd` and Tags: Finding Users and Topics](#fnd-and-tags-finding-users-and-topics)
 			- [Query Language](#query-language)
 			- [Incremental Updates to Queries](#incremental-updates-to-queries)
+			- [Query Rewrite](#query-rewrite)
 			- [Possible Use Cases](#possible-use-cases)
 		- [Peer to Peer Topics](#peer-to-peer-topics)
 		- [Group Topics](#group-topics)
@@ -124,6 +126,8 @@ Once the connection is opened, the client must issue a `{hi}` message to the ser
 
 See definition of the gRPC API in the [proto file](../pbx/model.proto). gRPC API has slightly more functionality than the API described in this document: it allows the `root` user to send messages on behalf of other users as well as delete users.
 
+The `bytes` fields in protobuf messages expect JSON-encoded UTF-8 content. For example, a string should be quoted before being converted to bytes as UTF-8: `[]byte("\"some string\"")` (Go), `'"another string"'.encode('utf-8')` (Python 3).
+
 ### WebSocket
 
 Messages are sent in text frames, one message per frame. Binary frames are reserved for future use. By default server allows connections with any value in the `Origin` header.
@@ -137,6 +141,10 @@ Server allows connections from all origins, i.e. `Access-Control-Allow-Origin: *
 ### Out of Band Large Files
 
 Large files are sent out of band using `HTTP POST` as `Content-Type: multipart/form-data`. See [below](#out-of-band-handling-of-large-files) for details.
+
+### Running Behind a Reverse Proxy
+
+Tinode server can be set up to run behind a reverse proxy, such as NGINX. For efficiency it can accept client connections from Unix sockets by setting `listen` and/or `grpc_listen` config parameters to the path of the Unix socket file, e.g. `unix:/run/tinode.sock`. The server may also be configured to read peer's IP address from `X-Forwarded-For` HTTP header by setting `use_x_forwarded_for` config parameter to `true`.
 
 ## Users
 
@@ -194,7 +202,7 @@ Compiled-in authenticator names may be changed by using `logical_names` configur
 
 When a new account is created, the user must inform the server which authentication method will be later used to gain access to this account as well as provide shared secret, if appropriate. Only `basic` and `anonymous` can be used during account creation. The `basic` requires the user to generate and send a unique login and password to the server. The `anonymous` does not exchange secrets.
 
-User may optionally set `{acc login=true}` to use the new account for immediate authentication. When `login=false` (or not set), the new account is created but the authentication status of the session which created the account remains unchanged. When `login=true` the server will attempt to authenticate the session with the new account, the response to the `{acc}` request will contain the authentication token on success. This is particularly important for the `anonymous` authentication.
+User may optionally set `{acc login=true}` to use the new account for immediate authentication. When `login=false` (or not set), the new account is created but the authentication status of the session which created the account remains unchanged. When `login=true` the server will attempt to authenticate the session with the new account, the `{ctrl}` response to the `{acc}` request will contain the authentication token on success. This is particularly important for the `anonymous` authentication because that's the only time when the authentication token can be retrieved.
 
 #### Logging in
 
@@ -243,7 +251,7 @@ Only the `root` user may suspend the account. To suspend the account the root us
 acc: {
   id: "1a2b3", // string, client-provided message id, optional
   user: "usr2il9suCbuko", // user being affected by the change
-  status: "suspended"
+  status: "susp"
 }
 ```
 Sending the same message with `status: "ok"` un-suspends the account. A root user may check account status by executing `{get what="desc"}` command against user's `me` topic.
@@ -273,12 +281,12 @@ User's access to a topic is defined by two sets of permissions: user's desired p
 * Read: `R`, permission to receive `{data}` packets
 * Write: `W`, permission to `{pub}` to topic
 * Presence: `P`, permission to receive presence updates `{pres}`
-* Approve: `A`, permission to approve requests to join a topic; a user with such permission is topic's manager
+* Approve: `A`, permission to approve requests to join a topic, remove and ban members; a user with such permission is topic's administrator
 * Sharing: `S`, permission to invite other people to join the topic
 * Delete: `D`, permission to hard-delete messages; only owners can completely delete topics
-* Owner: `O`, user is the topic owner; topic may have a single owner only; some topics have no owner
+* Owner: `O`, user is the topic owner; the owner can assign any other permission to any topic member, change topic description, delete topic; topic may have a single owner only; some topics have no owner
 
-Topic's default access is established at the topic creation time by `{sub.desc.defacs}` and can be subsequently modified by `{set}` messages. Default access is defined for two categories of users: authenticated and anonymous. This value is applied as a default "given" permission to all new subscriptions.
+Topic's default access is established at the topic creation time by `{sub.desc.defacs}` and can be subsequently modified by the owner by sending `{set}` messages. Default access is defined for two categories of users: authenticated and anonymous. This value is applied as a default "given" permission to all new subscriptions.
 
 Client may replace explicit permissions in `{sub}` and `{set}` messages with an empty string to tell Tinode to use default permissions. If client specifies no default access permissions at topic creation time, authenticated users will receive a `RWP` permission, anonymous users will receive an empty permission which means every subscription request must be explicitly approved by the topic manager.
 
@@ -328,13 +336,13 @@ Message `{get what="data"}` to `me` is rejected.
 
 ### `fnd` and Tags: Finding Users and Topics
 
-Topic `fnd` is automatically created for every user at the account creation time. It serves as an endpoint for discovering other users and group topics.
+Topic `fnd` is automatically created for every user at the account creation time. It serves as an endpoint for discovering other users and group topics. Users and group topics can be discovered by `tags`. Tags are optionally assigned at the topic or user creation time then can be updated by using `{set what="tags"}` against a `me` or a group topic.
 
-Users and group topics can be discovered by optional `tags`. Tags are optionally assigned at the topic or user creation time then can be updated by using `{set what="tags"}` against a `fnd` or a group topic.
+A tag is an arbitrary case-insensitive Unicode string (forced to lowercase on the server) up to 96 characters long which may contain characters from `Letter` and `Number` Unicode [classes/categories](https://en.wikipedia.org/wiki/Unicode_character_property#General_Category) as well as any of the following ASCII characters: `_`, `.`, `+`, `-`, `@`, `#`, `!`, `?`.
 
-A tag is an arbitrary case-insensitive Unicode string (forced to lowercase) starting with a Unicode letter or digit. `Tags` must not contain the double quote `"`, `\u0022` but may contain spaces. `Tags` may have a prefix which serves as a namespace. The prefix is a string followed by a colon `:`, ex. prefixed phone tag `tel:14155551212` or prefixed email tag `email:alice@example.com`. Some prefixed `tags` are optionally enforced to be unique. In that case only one user or topic may have such a tag. Certain `tags` may be forced to be immutable to the user, i.e. user's attempts to add or remove an immutable tag will be rejected by the server.
+Tag may have a prefix which serves as a namespace. The prefix is a 2-16 character string which starts with a letter [a-z] and may contain lowercase ASCII letters and numbers followed by a colon `:`, ex. prefixed phone tag `tel:+14155551212` or prefixed email tag `email:alice@example.com`. Some prefixed tags are optionally enforced to be unique. In that case only one user or topic may have such a tag. Certain tags may be forced to be immutable to the user, i.e. user's attempts to add or remove an immutable tag will be rejected by the server.
 
-The `tags` are indexed server-side and used in user and topic discovery. Search returns users and topics sorted by the number of matched tags in descending order.
+The tags are indexed server-side and used in user and topic discovery. Search returns users and topics sorted by the number of matched tags in descending order.
 
 In order to find users or topics, a user sets either `public` or `private` parameter of the `fnd` topic to a search query (see [Query language](#query-language)) then issues a `{get topic="fnd" what="sub"}` request. If both `public` and `private` are set, the `public` query is used. The `private` query is persisted across sessions and devices, i.e. all user's sessions see the same `private` query. The value of the `public` query is ephemeral, i.e. it's not saved to database and not shared between user's sessions. The `private` query is intended for large queries which do not change often, such as finding matches for everyone in user's contact list on a mobile phone. The `public` query is intended to be short and specific, such as finding some topic or a user who is not in the contact list.
 
@@ -342,15 +350,15 @@ The system responds with a `{meta}` message with the `sub` section listing detai
 
 Topic `fnd` is read-only. `{pub}` messages to `fnd` are rejected.
 
-(The following functionality is not implemented yet) When a new user registers with tags matching the given query, the `fnd` topic will receive `{pres}` notification for the new user.
+_CURRENTLY UNSUPPORTED_ When a new user registers with tags matching the given query, the `fnd` topic will receive `{pres}` notification for the new user.
 
 [Plugins](../pbx) support `Find` service which can be used to replace default search with a custom one.
 
 #### Query Language
 
-Tinode query language is used to define search queries for finding users and topics. The query is a string containing tags separated by spaces or commas. Tags are strings - individual query terms which are matched against user's or topic's tags. The tags can be written in an RTL language but the query as a whole is parsed left to right. Spaces are treated as the `AND` operator, commas (as well as commas preceded and/or followed by a space) as the `OR` operator. The order of operators is ignored: all `AND` tags are grouped together, all `OR` tags are grouped together. `OR` takes precedence over `AND`: if a tag is preceded of followed by a comma, it's an `OR` tag, otherwise an `AND`. For example, `a AND b OR c` is rewritten as `(b OR c) AND a`.
+Tinode query language is used to define search queries for finding users and topics. The query is a string containing atomic terms separated by spaces or commas. The individual query terms are matched against user's or topic's tags. The individual terms may be written in an RTL language but the query as a whole is parsed left to right. Spaces are treated as the `AND` operator, commas (as well as commas preceded and/or followed by a space) as the `OR` operator. The order of operators is ignored: all `AND` tags are grouped together, all `OR` tags are grouped together. `OR` takes precedence over `AND`: if a tag is preceded of followed by a comma, it's an `OR` tag, otherwise an `AND`. For example, `aaa bbb, ccc` (`aaa AND bbb OR ccc`) is interpreted as `(bbb OR ccc) AND aaa`.
 
-Tags containing spaces or commas must be enclosed in double quotes (`"`, `\u0022`): i.e. `"abc, def"` is treated as a single token `abc, def`. Tags must start with a Unicode letter or digit. Tags must not contain the double quote (`"`, `\u0022`).
+Query terms containing spaces must convert spaces to underscores ` ` -> `_`, e.g. `new york` -> `new_york`.
 
 **Some examples:**
 * `flowers`: find topics or users which contain tag `flowers`.
@@ -361,9 +369,19 @@ Tags containing spaces or commas must be enclosed in double quotes (`"`, `\u0022
 
 #### Incremental Updates to Queries
 
-Queries, particularly `fnd.private` could be arbitrarily large, limited only by the message size and by the underlying database. Instead of rewriting the entire query to add or remove a tag, tag can be added or removed incrementally.
+_CURRENTLY UNSUPPORTED_ Queries, particularly `fnd.private` could be arbitrarily large, limited only by the limits on the message size, and by the limits on the query size in the underlying database. Instead of rewriting the entire query to add or remove a term, terms can be added or removed incrementally.
 
-The incremental update request is processed left to right. It may contain the same tag multiple times, i.e. `-tag+tag` is a valid request.
+The incremental update request is processed left to right. It may contain the same term multiple times, i.e. `-a_tag+a_tag` is a valid request.
+
+#### Query Rewrite
+
+Finding users by login, phone or email requires query terms to be written with prefixes, i.e. `email:alice@example.com` instead of `alice@example.com`. This may present a problem to end users because it requires them to learn the query language. Tinode solves this problem by implementing _query rewrite_ on the server: if query term (tag) does not contain a prefix, server rewrites it by adding the appropriate prefix. In queries to `fnd.public` the original term is also kept (query `alice@example.com` is rewritten as `email:alice@example.com OR alice@example.com`), in queries to `fnd.private` only the rewritten term is kept (`alice@example.com` is rewritten as `email:alice@example.com`). All terms that look like email, for instance, `alice@example.com` are rewritten to `email:alice@example.com OR alice@example.com`. Terms which look like phone numbers are converted to [E.164](https://en.wikipedia.org/wiki/E.164) and also rewritten as `tel:+14155551212 OR +14155551212`. In addition, in queries to `fnd.public` all other unprefixed terms which look like logins are rewritten as logins: `alice` -> `basic:alice OR alice`.
+
+As described above, tags which look like phone numbers are converted to E.164 format. Such conversion requires an ISO 3166-1 alpha-2 country code. The following logic is used when converting phone number tags to E.164:
+* If the tag already contains a country calling code, it's used as is: `+1(415)555-1212` -> `+14155551212`.
+* If the tag has no prefix, country code is taken from the locale value set by the client in `lang` field of the `{hi}` message.
+* If client has not provided the code in the `hi.lang`, the country code is taken from `default_country_code` field of the `tinode.conf`.
+* If no `default_country_code` is set in `tinode.conf`, `US` country code is used.
 
 #### Possible Use Cases
 * Restricting users to organisations.
@@ -388,11 +406,20 @@ The 'private' parameter of a P2P topic is defined by each participant individual
 
 ### Group Topics
 
-Group topics represent communication channels between multiple users. The name of a group topic is `grp` followed by a string of characters from base64 URL-encoding set. No other assumptions can be made about internal structure or length of the group name.
+Group topic represents a communication channel between multiple users. The name of a group topic is `grp` or `chn` followed by a string of characters from base64 URL-encoding set. No other assumptions can be made about internal structure or length of the group name.
 
-A group topic is created by sending a `{sub}` message with the topic field set to string `new` optionally followed by any characters, e.g. `new` or `newAbC123` are equivalent. Tinode will respond with a `{ctrl}` message with the name of the newly created topic, i.e. `{sub topic="new"}` is replied with `{ctrl topic="grpmiKBkQVXnm3P"}`. If topic creation fails, the error is reported on the original topic name, i.e. `new` or `newAbC123`. The user who created the topic becomes topic owner. Ownership can be transferred to another user with a `{set}` message but one user must remain the owner at all times.
+Group topics support limited number of subscribers (controlled by a `max_subscriber_count` parameter in configuration file) with access permissions of each subscriber managed individually. Group topics may also be enabled to support any number of read-only users - `readers`. All `readers` have the same access permissions. Group topics with enabled `readers` are called `channels`.
 
-A user joining or leaving the topic generates a `{pres}` message to all other users who are currently in the joined state with the topic.
+A group topic is created by sending a `{sub}` message with the topic field set to string `new` or `nch` optionally followed by any characters, e.g. `new` or `newAbC123` are equivalent. Tinode will respond with a `{ctrl}` message with the name of the newly created topic, i.e. `{sub topic="new"}` is replied with `{ctrl topic="grpmiKBkQVXnm3P"}`. If topic creation fails, the error is reported on the original topic name, i.e. `new` or `newAbC123`. The user who created the topic becomes topic owner. Ownership can be transferred to another user with a `{set}` message but one user must remain the owner at all times.
+
+A `channel` topic is different from the non-channel group topic in the following ways:
+
+ * Channel topic is created by sending `{sub topic="nch"}`. Sending `{sub topic="new"}` will create a group topic without enabling channel functionality.
+ * Sending `{sub topic="chnAbC123"}` will create a `reader` subscription to a channel. A non-channel topic will reject such subscription request.
+ * When searching for topics using [`fnd`](#fnd-and-tags-finding-users-and-topics), channels will show addresses with `chn` prefixes, non-channel topic will show with `grp` prefixes.
+ * Messages received by readers on channels have no `From` field. Normal subscribers will receive messages with `From` containing ID of the sender.
+ * Default permissions for a channel and non-channel group topics are different: channel group topic grants no permissions at all.
+ * A subscriber joining or leaving the topic (regular or channel-enabled) generates a `{pres}` message to all other subscribers who are currently in the joined state with the topic and have appropriate permissions. Reader joining or leaving the channel generates no `{pres}` message.
 
 ### `sys` Topic
 
@@ -420,7 +447,7 @@ Topics and subscriptions have `public` and `private` fields. Generally, the fiel
 The format of the `public` field in group and peer to peer topics is expected to be a [vCard](https://en.wikipedia.org/wiki/VCard) although only `fn` and `photo` fields are currently used by client software:
 
 ```js
-vcard: {
+{
   fn: "John Doe", // string, formatted name
   n: {
     surname: "Miner", // last of family name
@@ -633,7 +660,8 @@ The `{acc}` message **cannot** be used to modify `desc` or `cred` of an existing
 ```js
 acc: {
   id: "1a2b3", // string, client-provided message id, optional
-  user: "new", // string, "new" to create a new user, default: current user, optional
+  user: "newABC123", // string, "new" optionally followed by any characters to create a new user,
+              // default: current user, optional
   token: "XMgS...8+BO0=", // string, authentication token to use for the request if the
                // session is not authenticated, optional
   status: "ok", // change user's status; no default value, optional.
@@ -673,8 +701,7 @@ acc: {
 }
 ```
 
-Server responds with a `{ctrl}` message with `params` containing details of the new user. If `desc.defacs` is missing,
-server will assign server-default access values.
+Server responds with a `{ctrl}` message with `params` containing details of the new user account such as user ID and, in case of `login: true`, authentication token. If `desc.defacs` is missing, the server will assign server-default access permissions to new account.
 
 The only supported authentication schemes for account creation are `basic` and `anonymous`.
 
@@ -709,7 +736,7 @@ The `{sub}` packet serves the following functions:
  * attaching session to a previously subscribed topic
  * fetching topic data
 
-User creates a new group topic by sending `{sub}` packet with the `topic` field set to `"new"`. Server will create a topic and respond back to session with the name of the newly created topic.
+User creates a new group topic by sending `{sub}` packet with the `topic` field set to `new12321` (regular topic) or `nch12321` (channel) where `12321` denotes any string including an empty string. Server will create a topic and respond back to the session with the name of the newly created topic.
 
 User creates a new peer to peer topic by sending `{sub}` packet with `topic` set to peer's user ID.
 
@@ -773,17 +800,16 @@ sub: {
       ims: "2015-10-06T18:07:30.038Z" // timestamp, "if modified since" - return
               // public and private values only if at least one of them has been
               // updated after the stated timestamp, optional
-
     },
 
     // Optional parameters for {get what="sub"}
     sub: {
       ims: "2015-10-06T18:07:30.038Z", // timestamp, "if modified since" - return
-              // public and private values only if at least one of them has been
-              // updated after the stated timestamp, optional
-    user: "usr2il9suCbuko", // string, return results for a single user,
+              // only those subscriptions which have been modified after the stated
+              // timestamp, optional
+      user: "usr2il9suCbuko", // string, return results for a single user,
                             // any topic other than 'me', optional
-    topic: "usr2il9suCbuko", // string, return results for a single topic,
+      topic: "usr2il9suCbuko", // string, return results for a single topic,
                             // 'me' topic only, optional
       limit: 20 // integer, limit the number of returned objects
     },
@@ -860,7 +886,7 @@ The unique message ID should be formed as `<topic_name>:<seqId>` whenever possib
 
 #### `{get}`
 
-Query topic for metadata, such as description or a list of subscribers, or query message history.
+Query topic for metadata, such as description or a list of subscribers, or query message history. The requester must be [subscribed and attached](#sub) to the topic to receive the full response. Some limited `desc` and `sub` information is available without being attached.
 
 ```js
 get: {
@@ -915,6 +941,8 @@ get: {
 Query topic description. Server responds with a `{meta}` message containing requested data. See `{meta}` for details.
 If `ims` is specified and data has not been updated, the message will skip `public` and `private` fields.
 
+Limited information is available without [attaching](#sub) to topic first.
+
 See [Public and Private Fields](#public-and-private-fields) for `private` and `public` format considerations.
 
 * `{get what="sub"}`
@@ -922,6 +950,8 @@ See [Public and Private Fields](#public-and-private-fields) for `private` and `p
 Get a list of subscribers. Server responds with a `{meta}` message containing a list of subscribers. See `{meta}` for details.
 For `me` topic the request returns a list of user's subscriptions. If `ims` is specified and data has not been updated,
 responds with a `{ctrl}` "not modified" message.
+
+Only user's own subscription is returned without [attaching](#sub) to topic first.
 
 * `{get what="tags"}`
 
@@ -943,7 +973,7 @@ Query [credentials](#credentail-validation). Server responds with a `{meta}` mes
 
 #### `{set}`
 
-Update topic metadata, delete messages or topic.
+Update topic metadata, delete messages or topic. The requester is generally expected to be [subscribed and attached](#sub) to the topic. Only `desc.private` and requester's `sub.mode` can be updated without attaching first.
 
 ```js
 set: {
@@ -1085,7 +1115,7 @@ data: {
 }
 ```
 
-Data messages have a `seq` field which holds a sequential numeric ID generated by the server. The IDs are guaranteed to be unique within a topic. IDs start from 1 and sequentially increment with every successful `{pub}`](#pub) message received by the topic.
+Data messages have a `seq` field which holds a sequential numeric ID generated by the server. The IDs are guaranteed to be unique within a topic. IDs start from 1 and sequentially increment with every successful [`{pub}`](#pub) message received by the topic.
 
 See [Format of Content](#format-of-content) for `content` format considerations.
 
@@ -1112,7 +1142,7 @@ ctrl: {
 
 #### `{meta}`
 
-Information about topic metadata or subscribers, sent in response to `{set}` or `{sub}` message to the originating session.
+Information about topic metadata or subscribers, sent in response to `{get}`, `{set}` or `{sub}` message to the originating session.
 
 ```js
 meta: {
@@ -1163,12 +1193,13 @@ meta: {
         mode: "JRWP" // string, combination of want and given
       },
       read: 112, // integer, ID of the message user claims through {note} message
-                 // to have read, optional
-      recv: 315, // integer, like 'read', but received, optional
+                 // to have read, optional.
+      recv: 315, // integer, like 'read', but received, optional.
       clear: 12, // integer, in case some messages were deleted, the greatest ID
-                 // of a deleted message, optional
-      private: { ... } // application-defined user's 'private' object, present only
-                       // for the requester's own subscriptions.
+                 // of a deleted message, optional.
+      public: { ... }, // application-defined user's 'public' object, absent when
+                       // querying P2P topics.
+      private: { ... } // application-defined user's 'private' object.
       online: true, // boolean, current online status of the user; if this is a
                     // group or a p2p topic, it's user's online status in the topic,
                     // i.e. if the user is attached and listening to messages; if this
@@ -1183,11 +1214,8 @@ meta: {
       topic: "grp1XUtEhjv6HND", // string, topic this subscription describes
       seq: 321, // integer, server-issued id of the last {data} message
 
-      // The following fields are present only when querying 'me' topic and the
+      // The following field is present only when querying 'me' topic and the
       // topic described is a P2P topic
-
-      public: { ... }, // application-defined user's 'public' object, present for
-                      // P2P topics only
       seen: { // object, if this is a P2P topic, info on when the peer was last
               //online
         when: "2015-10-24T10:26:09.716Z", // timestamp

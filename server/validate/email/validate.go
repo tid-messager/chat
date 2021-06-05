@@ -3,11 +3,11 @@ package email
 
 import (
 	"bytes"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"math/rand"
 	qp "mime/quotedprintable"
 	"net/mail"
@@ -20,6 +20,7 @@ import (
 	textt "text/template"
 	"time"
 
+	"github.com/tinode/chat/server/logs"
 	"github.com/tinode/chat/server/store"
 	t "github.com/tinode/chat/server/store/types"
 	i18n "golang.org/x/text/language"
@@ -49,6 +50,11 @@ type validator struct {
 	SMTPAddr string `json:"smtp_server"`
 	// Port of the SMTP server.
 	SMTPPort string `json:"smtp_port"`
+	// ServerName used in SMTP HELO/EHLO command.
+	SMTPHeloHost string `json:"smtp_helo_host"`
+	// Skip verification of the server's certificate chain and host name.
+	// In this mode, TLS is susceptible to machine-in-the-middle attacks.
+	TLSInsecureSkipVerify bool `json:"insecure_skip_verify"`
 	// Optional whitelist of email domains accepted for registration.
 	Domains []string `json:"domains"`
 
@@ -95,7 +101,7 @@ func resolveTemplatePath(path string) string {
 func readTemplateFile(pathTempl *textt.Template, lang string) (*textt.Template, string, error) {
 	buffer := bytes.Buffer{}
 	err := pathTempl.Execute(&buffer, map[string]interface{}{"Language": lang})
-	path := string(buffer.Bytes())
+	path := buffer.String()
 	if err != nil {
 		return nil, path, fmt.Errorf("reading %s: %w", path, err)
 	}
@@ -152,8 +158,7 @@ func executeTemplate(template *textt.Template, params map[string]interface{}) (*
 
 // Init: initialize validator.
 func (v *validator) Init(jsonconf string) error {
-	var err error
-	if err = json.Unmarshal([]byte(jsonconf), v); err != nil {
+	if err := json.Unmarshal([]byte(jsonconf), v); err != nil {
 		return err
 	}
 
@@ -163,12 +168,9 @@ func (v *validator) Init(jsonconf string) error {
 	}
 	v.senderEmail = sender.Address
 
-	// Check if login is provided explicitly. Otherwise parse Sender and use that as login for authentication.
+	// Enable auth if login is provided.
 	if v.Login != "" {
 		v.auth = smtp.PlainAuth("", v.Login, v.SenderPassword, v.SMTPAddr)
-	} else {
-		// SendFrom could be an RFC 5322 address of the form "John Doe <jdoe@example.com>". Parse it.
-		v.auth = smtp.PlainAuth("", v.senderEmail, v.SenderPassword, v.SMTPAddr)
 	}
 
 	// Optionally resolve paths against the location of this executable file.
@@ -254,7 +256,9 @@ func (v *validator) Init(jsonconf string) error {
 		hostUrl.Path = "/"
 	}
 	v.HostUrl = hostUrl.String()
-
+	if v.SMTPHeloHost == "" {
+		v.SMTPHeloHost = hostUrl.Hostname()
+	}
 	if v.MaxRetries == 0 {
 		v.MaxRetries = maxRetries
 	}
@@ -266,15 +270,16 @@ func (v *validator) Init(jsonconf string) error {
 }
 
 // PreCheck validates the credential and parameters without sending an email.
-func (v *validator) PreCheck(cred string, params interface{}) error {
+// If the credential is valid, it's returned with an appropriate prefix.
+func (v *validator) PreCheck(cred string, _ map[string]interface{}) (string, error) {
 	if len(cred) > maxEmailLength {
-		return t.ErrMalformed
+		return "", t.ErrMalformed
 	}
 
 	// The email must be plain user@domain.
 	addr, err := mail.ParseAddress(cred)
 	if err != nil || addr.Address != cred {
-		return t.ErrMalformed
+		return "", t.ErrMalformed
 	}
 
 	// Normalize email to make sure Unicode case collisions don't lead to security problems.
@@ -285,7 +290,7 @@ func (v *validator) PreCheck(cred string, params interface{}) error {
 		// Parse email into user and domain parts.
 		parts := strings.Split(addr.Address, "@")
 		if len(parts) != 2 {
-			return t.ErrMalformed
+			return "", t.ErrMalformed
 		}
 
 		var found bool
@@ -297,11 +302,11 @@ func (v *validator) PreCheck(cred string, params interface{}) error {
 		}
 
 		if !found {
-			return t.ErrPolicy
+			return "", t.ErrPolicy
 		}
 	}
 
-	return nil
+	return validatorName + ":" + addr.Address, nil
 }
 
 // Send a request for confirmation to the user: makes a record in DB  and nothing else.
@@ -433,6 +438,56 @@ func (v *validator) Remove(user t.Uid, value string) error {
 	return store.Users.DelCred(user, validatorName, value)
 }
 
+// SendMail replacement
+//
+func (v *validator) sendMail(rcpt []string, msg []byte) error {
+
+	client, err := smtp.Dial(v.SMTPAddr + ":" + v.SMTPPort)
+	if err != nil {
+		return err
+	}
+	defer client.Close()
+	if err = client.Hello(v.SMTPHeloHost); err != nil {
+		return err
+	}
+	if istls, _ := client.Extension("STARTTLS"); istls {
+		tlsConfig := &tls.Config{
+			InsecureSkipVerify: v.TLSInsecureSkipVerify,
+			ServerName:         v.SMTPAddr,
+		}
+		if err = client.StartTLS(tlsConfig); err != nil {
+			return err
+		}
+	}
+	if v.auth != nil {
+		if isauth, _ := client.Extension("AUTH"); isauth {
+			err = client.Auth(v.auth)
+			if err != nil {
+				return err
+			}
+		}
+	}
+	if err = client.Mail(strings.ReplaceAll(strings.ReplaceAll(v.senderEmail, "\r", " "), "\n", " ")); err != nil {
+		return err
+	}
+	for _, to := range rcpt {
+		if err = client.Rcpt(strings.ReplaceAll(strings.ReplaceAll(to, "\r", " "), "\n", " ")); err != nil {
+			return err
+		}
+	}
+	w, err := client.Data()
+	if err != nil {
+		return err
+	}
+	if _, err = w.Write(msg); err != nil {
+		return err
+	}
+	if err = w.Close(); err != nil {
+		return err
+	}
+	return client.Quit()
+}
+
 // This is a basic SMTP sender which connects to a server using login/password.
 // -
 // See here how to send email from Amazon SES:
@@ -485,11 +540,12 @@ func (v *validator) send(to string, content *emailContent) error {
 
 		message.WriteString("\r\n--" + boundary + "--")
 	}
+
 	message.WriteString("\r\n")
 
-	err := smtp.SendMail(v.SMTPAddr+":"+v.SMTPPort, v.auth, v.senderEmail, []string{to}, message.Bytes())
+	err := v.sendMail([]string{to}, message.Bytes())
 	if err != nil {
-		log.Println("SMTP error", to, err)
+		logs.Warn.Println("SMTP error", to, err)
 	}
 
 	return err

@@ -49,6 +49,8 @@ const (
 	ErrPermissionDenied = StoreError("denied")
 	// ErrInvalidResponse means the client's response does not match server's expectation.
 	ErrInvalidResponse = StoreError("invalid response")
+	// ErrRedirected means the subscription request was redirected to another topic.
+	ErrRedirected = StoreError("redirected")
 )
 
 // Uid is a database-specific record id, suitable to be used as a primary key.
@@ -60,7 +62,7 @@ const ZeroUid Uid = 0
 // NullValue is a Unicode DEL character which indicated that the value is being deleted.
 const NullValue = "\u2421"
 
-// Lengths of various Uid representations
+// Lengths of various Uid representations.
 const (
 	uidBase64Unpadded = 11
 	p2pBase64Unpadded = 22
@@ -155,14 +157,14 @@ func (uid Uid) String32() string {
 	return strings.ToLower(base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(data))
 }
 
-// ParseUid parses string NOT prefixed with anything
+// ParseUid parses string NOT prefixed with anything.
 func ParseUid(s string) Uid {
 	var uid Uid
 	uid.UnmarshalText([]byte(s))
 	return uid
 }
 
-// ParseUid32 parses base32-encoded string into Uid
+// ParseUid32 parses base32-encoded string into Uid.
 func ParseUid32(s string) Uid {
 	var uid Uid
 	if data, err := base32.StdEncoding.WithPadding(base32.NoPadding).DecodeString(s); err == nil {
@@ -171,7 +173,7 @@ func ParseUid32(s string) Uid {
 	return uid
 }
 
-// UserId converts Uid to string prefixed with 'usr', like usrXXXXX
+// UserId converts Uid to string prefixed with 'usr', like usrXXXXX.
 func (uid Uid) UserId() string {
 	return uid.PrefixId("usr")
 }
@@ -189,13 +191,45 @@ func (uid Uid) PrefixId(prefix string) string {
 	return prefix + uid.String()
 }
 
-// ParseUserId parses user ID of the form "usrXXXXXX"
+// ParseUserId parses user ID of the form "usrXXXXXX".
 func ParseUserId(s string) Uid {
 	var uid Uid
 	if strings.HasPrefix(s, "usr") {
 		(&uid).UnmarshalText([]byte(s)[3:])
 	}
 	return uid
+}
+
+// GrpToChn converts group topic name to corresponding channel name.
+func GrpToChn(grp string) string {
+	if strings.HasPrefix(grp, "grp") {
+		return strings.Replace(grp, "grp", "chn", 1)
+	}
+	// Return unchanged if it's a channel already.
+	if strings.HasPrefix(grp, "chn") {
+		return grp
+	}
+	return ""
+}
+
+// IsChannel checks if the given topic name is a reference to a channel.
+// The "nch" should not be considered a channel reference because it can only be used by the topic owner at the time of
+// group topic creation.
+func IsChannel(name string) bool {
+	return strings.HasPrefix(name, "chn")
+}
+
+// ChnToGrp gets group topic name from channel name.
+// If it's a non-channel group topic, the name is returned unchanged.
+func ChnToGrp(chn string) string {
+	if strings.HasPrefix(chn, "chn") {
+		return strings.Replace(chn, "chn", "grp", 1)
+	}
+	// Return unchanged if it's a group already.
+	if strings.HasPrefix(chn, "grp") {
+		return chn
+	}
+	return ""
 }
 
 // UidSlice is a slice of Uids sorted in ascending order.
@@ -242,13 +276,13 @@ func (us *UidSlice) Rem(uid Uid) bool {
 	return true
 }
 
-// Contains checks if the UidSlice contains the given uid
+// Contains checks if the UidSlice contains the given UID.
 func (us UidSlice) Contains(uid Uid) bool {
 	_, contains := us.find(uid)
 	return contains
 }
 
-// P2PName takes two Uids and generates a P2P topic name
+// P2PName takes two Uids and generates a P2P topic name.
 func (uid Uid) P2PName(u2 Uid) string {
 	if !uid.IsZero() && !u2.IsZero() {
 		b1, _ := uid.MarshalBinary()
@@ -502,6 +536,10 @@ const (
 	ModeCReadOnly = ModeJoin | ModeRead
 	// Access to 'sys' topic by a root user ("JRWPD", 79, 0x4F)
 	ModeCSys = ModeJoin | ModeRead | ModeWrite | ModePres | ModeDelete
+	// Channel publisher: person authorized to publish content; no J: by invitation only ("RWPD", 78, 0x4E)
+	ModeCChnWriter = ModeRead | ModeWrite | ModePres | ModeShare
+	// Reader's access mode to a channel (JRP, 11, 0xB).
+	ModeCChnReader = ModeJoin | ModeRead | ModePres
 
 	// Admin: user who can modify access mode ("OA", dec: 144, hex: 0x90)
 	ModeCAdmin = ModeOwner | ModeApprove
@@ -525,8 +563,8 @@ func (m AccessMode) MarshalText() ([]byte, error) {
 		return nil, errors.New("AccessMode invalid")
 	}
 
-	var res = []byte{}
-	var modes = []byte{'J', 'R', 'W', 'P', 'A', 'S', 'D', 'O'}
+	res := []byte{}
+	modes := []byte{'J', 'R', 'W', 'P', 'A', 'S', 'D', 'O'}
 	for i, chr := range modes {
 		if (m & (1 << uint(i))) != 0 {
 			res = append(res, chr)
@@ -535,9 +573,8 @@ func (m AccessMode) MarshalText() ([]byte, error) {
 	return res, nil
 }
 
-// UnmarshalText parses access mode string as byte slice.
-// Does not change the mode if the string is empty or invalid.
-func (m *AccessMode) UnmarshalText(b []byte) error {
+// ParseAcs parses AccessMode from a byte array.
+func ParseAcs(b []byte) (AccessMode, error) {
 	m0 := ModeUnset
 
 Loop:
@@ -560,11 +597,25 @@ Loop:
 		case 'O', 'o':
 			m0 |= ModeOwner
 		case 'N', 'n':
+			if m0 != ModeUnset {
+				return ModeUnset, errors.New("AccessMode: access N cannot be combined with any other")
+			}
 			m0 = ModeNone // N means explicitly no access, all bits cleared
 			break Loop
 		default:
-			return errors.New("AccessMode: invalid character '" + string(b[i]) + "'")
+			return ModeUnset, errors.New("AccessMode: invalid character '" + string(b[i]) + "'")
 		}
+	}
+
+	return m0, nil
+}
+
+// UnmarshalText parses access mode string as byte slice.
+// Does not change the mode if the string is empty or invalid.
+func (m *AccessMode) UnmarshalText(b []byte) error {
+	m0, err := ParseAcs(b)
+	if err != nil {
+		return err
 	}
 
 	if m0 != ModeUnset {
@@ -633,9 +684,8 @@ func (grant AccessMode) BetterEqual(want AccessMode) bool {
 // Zero delta is an empty string ""
 func (o AccessMode) Delta(n AccessMode) string {
 	// Removed bits, bits present in 'old' but missing in 'new' -> '-'
-	o2n := ModeBitmask & o &^ n
 	var removed string
-	if o2n > 0 {
+	if o2n := ModeBitmask & o &^ n; o2n > 0 {
 		removed = o2n.String()
 		if removed != "" {
 			removed = "-" + removed
@@ -643,15 +693,68 @@ func (o AccessMode) Delta(n AccessMode) string {
 	}
 
 	// Added bits, bits present in 'n' but missing in 'o' -> '+'
-	n2o := ModeBitmask & n &^ o
 	var added string
-	if n2o > 0 {
+	if n2o := ModeBitmask & n &^ o; n2o > 0 {
 		added = n2o.String()
 		if added != "" {
 			added = "+" + added
 		}
 	}
 	return added + removed
+}
+
+// ApplyMutation sets of modifies access mode:
+// * if `mutation` contains either '+' or '-', attempts to apply a delta change on `m`.
+// * otherwise, treats it as an assignment.
+func (m *AccessMode) ApplyMutation(mutation string) error {
+	if mutation == "" {
+		return nil
+	}
+	if strings.ContainsAny(mutation, "+-") {
+		return m.ApplyDelta(mutation)
+	}
+	return m.UnmarshalText([]byte(mutation))
+}
+
+// ApplyDelta applies the acs delta to AccessMode.
+// Delta is in the same format as generated by AccessMode.Delta.
+// E.g. JPRA.ApplyDelta(-PR+W) -> JWA.
+func (m *AccessMode) ApplyDelta(delta string) error {
+	if delta == "" || delta == "N" {
+		// No updates.
+		return nil
+	}
+	m0 := *m
+	for next := 0; next+1 < len(delta) && next >= 0; {
+		ch := delta[next]
+		end := strings.IndexAny(delta[next+1:], "+-")
+		var chunk string
+		if end >= 0 {
+			end += next + 1
+			chunk = delta[next+1 : end]
+		} else {
+			chunk = delta[next+1:]
+		}
+		next = end
+		upd, err := ParseAcs([]byte(chunk))
+		if err != nil {
+			return err
+		}
+		switch ch {
+		case '+':
+			if upd != ModeUnset {
+				m0 |= upd & ModeBitmask
+			}
+		case '-':
+			if upd != ModeUnset {
+				m0 &^= upd & ModeBitmask
+			}
+		default:
+			return errors.New("Invalid acs delta string: '" + delta + "'")
+		}
+	}
+	*m = m0
+	return nil
 }
 
 // IsJoiner checks if joiner flag J is set.
@@ -1060,8 +1163,7 @@ func (rs RangeSorter) Less(i, j int) bool {
 // The ranges are expected to be sorted.
 // Ranges are inclusive-inclusive, i.e. [1..3] -> 1, 2, 3.
 func (rs RangeSorter) Normalize() RangeSorter {
-	ll := rs.Len()
-	if ll > 1 {
+	if ll := rs.Len(); ll > 1 {
 		prev := 0
 		for i := 1; i < ll; i++ {
 			if rs[prev].Low == rs[i].Low {
@@ -1132,7 +1234,7 @@ func GetTopicCat(name string) TopicCat {
 		return TopicCatMe
 	case "p2p":
 		return TopicCatP2P
-	case "grp":
+	case "grp", "chn":
 		return TopicCatGrp
 	case "fnd":
 		return TopicCatFnd
@@ -1179,4 +1281,13 @@ type FileDef struct {
 	Size int64
 	// Internal file location, i.e. path on disk or an S3 blob address.
 	Location string
+}
+
+// FlattenDoubleSlice turns 2d slice into a 1d slice.
+func FlattenDoubleSlice(data [][]string) []string {
+	var result []string
+	for _, el := range data {
+		result = append(result, el...)
+	}
+	return result
 }
