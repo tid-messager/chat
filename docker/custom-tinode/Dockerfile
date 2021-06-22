@@ -55,7 +55,8 @@ ENV MYSQL_DSN='root@tcp(mysql)/tinode'
 ENV PLUGIN_PYTHON_CHAT_BOT_ENABLED=false
 
 # Default handler for large files
-ENV MEDIA_HANDLER=fs
+ARG MEDIA_HANDLER=fs
+ENV MEDIA_HANDLER=$MEDIA_HANDLER
 
 # Whitelisted domains for S3 large media handler.
 ENV AWS_CORS_ORIGINS='["*"]'
@@ -137,6 +138,16 @@ RUN chmod +x credentials.sh
 ENV REST_SERVER_URL=$REST_SERVER_URL
 ENV CUSTOM_PUSH_ADDRESS=$CUSTOM_PUSH_ADDRESS
 ENV MONGODB_ADDRESSES=$MONGODB_ADDRESSES
+
+# Value "basic:rest" from used rest config.
+# by default used basic config
+ARG LOGICAL_NAMES=
+ENV LOGICAL_NAMES=$LOGICAL_NAMES 
+
+ENV AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID
+ENV AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY
+ENV AWS_REGION=$AWS_REGION
+ENV AWS_S3_BUCKET=$AWS_S3_BUCKET
 
 # Generate config from template and run the server.
 ENTRYPOINT ./entrypoint.sh
