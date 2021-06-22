@@ -276,7 +276,7 @@ func main() {
 	curwd, err := os.Getwd()
 	if err != nil {
 		logs.Err.Fatal("Couldn't get current working directory: ", err)
-  }
+	}
 
 	logs.Info.Printf("Server v%s:%s:%s; pid %d; %d process(es)",
 		currentVersion, executable, buildstamp,
