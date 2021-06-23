@@ -87,7 +87,7 @@ func main() {
 
 	srv := &http.Server{
 		Handler: r,
-		Addr:    "localhost:8080",
+		Addr:    ":8080",
 		// Good practice: enforce timeouts for servers you create!
 		WriteTimeout: 15 * time.Second,
 		ReadTimeout:  15 * time.Second,
@@ -169,7 +169,7 @@ func rtagnsHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func parseSecret(secret string) (string, string) {
-
+	fmt.Println("", time.Now(), "parseSecret() secret:", secret)
 	payload, _ := base64.URLEncoding.DecodeString(string(secret))
 	pair := strings.SplitN(string(payload), ":", 2)
 	return pair[0], pair[1]
